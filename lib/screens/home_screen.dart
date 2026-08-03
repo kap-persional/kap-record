@@ -8,41 +8,76 @@ import '../providers/settings_provider.dart';
 import '../widgets/record_button.dart';
 import '../widgets/timer_display.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
-  Future<void> _onRecordPressed(BuildContext context) async {
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  bool _stopping = false;
+
+  Future<void> _onRecordPressed() async {
     final recorder = context.read<RecorderProvider>();
     final granted = await recorder.requestConsent();
     if (!granted) {
-      if (context.mounted) {
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Bạn cần đồng ý chia sẻ màn hình để bắt đầu ghi hình')),
         );
       }
       return;
     }
-    if (context.mounted) {
+    if (mounted) {
       await Navigator.of(context).pushNamed('/countdown');
     }
   }
 
-  Future<void> _onStopPressed(BuildContext context) async {
+  Future<void> _onStopPressed() async {
+    if (_stopping) return;
+    setState(() => _stopping = true);
     final recorder = context.read<RecorderProvider>();
     try {
       final result = await recorder.stop();
-      if (context.mounted && result != null) {
+      if (!mounted) return;
+      if (result != null) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Đã lưu: ${result.displayPath}')),
         );
+      } else {
+        await _showStopFailedDialog('Ghi hình không lưu được. Hãy thử lại.');
       }
     } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Lỗi khi dừng ghi hình: $e')),
-        );
+      if (mounted) {
+        await _showStopFailedDialog('$e');
       }
+    } finally {
+      if (mounted) setState(() => _stopping = false);
     }
+  }
+
+  Future<void> _showStopFailedDialog(String message) {
+    return showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Không thể dừng ghi hình'),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Đóng'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              _onStopPressed();
+            },
+            child: const Text('Thử lại'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -51,6 +86,19 @@ class HomeScreen extends StatelessWidget {
     final settings = context.watch<SettingsProvider>();
     final phase = recorder.phase;
     final isActive = phase == RecorderPhase.recording || phase == RecorderPhase.paused;
+
+    final pendingError = recorder.takePendingError();
+    if (pendingError != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Ghi hình gặp lỗi: $pendingError'),
+            duration: const Duration(seconds: 6),
+          ),
+        );
+      });
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -69,13 +117,23 @@ class HomeScreen extends StatelessWidget {
           children: [
             TimerDisplay(elapsedSeconds: recorder.elapsedSeconds, isPaused: recorder.isPaused),
             const SizedBox(height: 40),
-            RecordButton(
-              phase: phase,
-              onStart: () => _onRecordPressed(context),
-              onPause: () => context.read<RecorderProvider>().pause(),
-              onResume: () => context.read<RecorderProvider>().resume(),
-              onStop: () => _onStopPressed(context),
-            ),
+            if (_stopping)
+              const Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 12),
+                  Text('Đang dừng ghi hình…'),
+                ],
+              )
+            else
+              RecordButton(
+                phase: phase,
+                onStart: _onRecordPressed,
+                onPause: () => context.read<RecorderProvider>().pause(),
+                onResume: () => context.read<RecorderProvider>().resume(),
+                onStop: _onStopPressed,
+              ),
             const SizedBox(height: 32),
             if (!isActive) ...[
               Wrap(

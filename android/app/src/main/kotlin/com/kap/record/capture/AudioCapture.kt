@@ -49,44 +49,65 @@ class AudioCapture(
             return
         }
 
-        val captureConfig = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
-            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-            .addMatchingUsage(AudioAttributes.USAGE_GAME)
-            .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-            .build()
+        try {
+            val captureConfig = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                .build()
 
-        val channelMask = AudioFormat.CHANNEL_IN_STEREO
-        val audioFormat = AudioFormat.Builder()
-            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-            .setSampleRate(quality.sampleRate)
-            .setChannelMask(channelMask)
-            .build()
+            val channelMask = AudioFormat.CHANNEL_IN_STEREO
+            val audioFormat = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(quality.sampleRate)
+                .setChannelMask(channelMask)
+                .build()
 
-        minBufferSize = AudioRecord.getMinBufferSize(
-            quality.sampleRate,
-            channelMask,
-            AudioFormat.ENCODING_PCM_16BIT
-        ).let { if (it > 0) it else quality.sampleRate * 2 * channelCount }
+            minBufferSize = AudioRecord.getMinBufferSize(
+                quality.sampleRate,
+                channelMask,
+                AudioFormat.ENCODING_PCM_16BIT
+            ).let { if (it > 0) it else quality.sampleRate * 2 * channelCount }
 
-        audioRecord = AudioRecord.Builder()
-            .setAudioFormat(audioFormat)
-            .setBufferSizeInBytes(minBufferSize * 4)
-            .setAudioPlaybackCaptureConfig(captureConfig)
-            .build()
+            val record = AudioRecord.Builder()
+                .setAudioFormat(audioFormat)
+                .setBufferSizeInBytes(minBufferSize * 4)
+                .setAudioPlaybackCaptureConfig(captureConfig)
+                .build()
 
-        val format = MediaFormat.createAudioFormat(
-            MediaFormat.MIMETYPE_AUDIO_AAC,
-            quality.sampleRate,
-            channelCount
-        ).apply {
-            setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            setInteger(MediaFormat.KEY_BIT_RATE, quality.bitrate)
+            // AudioRecord có thể "khởi tạo xong" (không ném exception) nhưng vẫn ở trạng thái
+            // UNINITIALIZED nếu cấu hình không được thiết bị hỗ trợ — đây là lỗi rất dễ bị bỏ sót
+            // vì startRecording()/read() sau đó không nhất thiết báo lỗi rõ ràng, dẫn tới ghi hình
+            // "chạy bình thường" nhưng không có mẫu âm thanh nào thực sự được đưa vào encoder.
+            if (record.state != AudioRecord.STATE_INITIALIZED) {
+                record.release()
+                onCodecError(IllegalStateException("Không thể khởi tạo AudioRecord để ghi âm thanh nội bộ (thiết bị có thể không hỗ trợ)"))
+                return
+            }
+            audioRecord = record
+
+            val format = MediaFormat.createAudioFormat(
+                MediaFormat.MIMETYPE_AUDIO_AAC,
+                quality.sampleRate,
+                channelCount
+            ).apply {
+                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                setInteger(MediaFormat.KEY_BIT_RATE, quality.bitrate)
+            }
+            codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            codec.start()
+
+            record.startRecording()
+            if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                onCodecError(IllegalStateException("AudioRecord không chuyển sang trạng thái đang ghi được"))
+                return
+            }
+        } catch (t: Throwable) {
+            onCodecError(t)
+            return
         }
-        codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        codec.start()
 
-        audioRecord?.startRecording()
         running.set(true)
         paused = false
 
@@ -123,6 +144,7 @@ class AudioCapture(
     private fun runLoop() {
         val pcmBuffer = ByteArray(minBufferSize)
         val startNanos = System.nanoTime()
+        var consecutiveErrors = 0
         try {
             while (running.get()) {
                 if (paused) {
@@ -133,7 +155,18 @@ class AudioCapture(
                 val read = record.read(pcmBuffer, 0, pcmBuffer.size)
                 val captureTimeUs = (System.nanoTime() - startNanos) / 1000
                 if (read > 0) {
+                    consecutiveErrors = 0
                     feedInput(pcmBuffer, read, captureTimeUs, endOfStream = false)
+                } else if (read < 0) {
+                    // read() trả về mã lỗi âm (ERROR_INVALID_OPERATION, ERROR_DEAD_OBJECT...).
+                    // Vài lần đầu có thể chỉ là tạm thời, nhưng nếu lặp lại liên tục nghĩa là
+                    // AudioRecord thực sự hỏng — phải abort thay vì âm thầm ghi ra file trống.
+                    consecutiveErrors++
+                    if (consecutiveErrors >= 50) {
+                        onCodecError(IllegalStateException("AudioRecord liên tục lỗi khi đọc (mã $read) — dừng ghi âm thanh nội bộ"))
+                        return
+                    }
+                    Thread.sleep(20)
                 }
                 drainOutput(endOfStream = false)
             }

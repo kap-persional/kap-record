@@ -14,6 +14,7 @@ class RecorderProvider extends ChangeNotifier {
   StreamSubscription<RecordingSnapshot>? _subscription;
 
   RecordingSnapshot _snapshot = RecordingSnapshot.idleInitial;
+  String? _pendingErrorEvent;
 
   RecordingSnapshot get snapshot => _snapshot;
   RecorderPhase get phase => _snapshot.phase;
@@ -21,8 +22,21 @@ class RecorderProvider extends ChangeNotifier {
   bool get isPaused => _snapshot.isPaused;
 
   void _onSnapshot(RecordingSnapshot snapshot) {
+    final previousError = _snapshot.error;
     _snapshot = snapshot;
+    // Chỉ coi là "lỗi mới" khi nó vừa xuất hiện (không có ở snapshot trước) — tránh hiện lại
+    // liên tục cùng một lỗi mỗi lần có state khác được đẩy tới.
+    if (snapshot.error != null && snapshot.error != previousError) {
+      _pendingErrorEvent = snapshot.error;
+    }
     notifyListeners();
+  }
+
+  /// Lấy lỗi mới nhất chưa được hiển thị (nếu có) rồi xoá đi, để UI chỉ hiện một lần.
+  String? takePendingError() {
+    final error = _pendingErrorEvent;
+    _pendingErrorEvent = null;
+    return error;
   }
 
   Future<bool> requestConsent() => _channel.requestProjectionConsent();

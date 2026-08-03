@@ -210,12 +210,32 @@ class ScreenRecordService : Service() {
             RecordingStateHolder.markRecordingStarted(this)
             mainHandler.post(tickerRunnable)
             mainHandler.post { updateNotificationTick() }
+            scheduleStartWatchdog(muxer)
             callback(true, null)
         } catch (t: Throwable) {
             Log.e(TAG, "Không thể bắt đầu ghi hình", t)
             cleanupAfterFailure()
             callback(false, t.message ?: "Không thể bắt đầu ghi hình")
         }
+    }
+
+    /**
+     * Nếu sau [START_WATCHDOG_MS] mà MediaMuxer vẫn chưa thực sự start() được (thường do
+     * track audio không bao giờ sẵn sàng — ví dụ AudioRecord không khởi tạo được trên máy
+     * cụ thể), toàn bộ khung hình đã và đang bị lặng lẽ bỏ qua dù UI vẫn hiển thị "đang ghi"
+     * bình thường. Phải phát hiện và huỷ sớm, tránh để buổi ghi chạy hết cả buổi rồi mới lộ
+     * ra file trống/hỏng khi mở lên xem.
+     */
+    private fun scheduleStartWatchdog(muxer: MuxerController) {
+        mainHandler.postDelayed({
+            if (RecordingStateHolder.state == RecordingState.RECORDING && !muxer.hasStarted()) {
+                Log.e(TAG, "Watchdog: muxer chưa start sau ${START_WATCHDOG_MS}ms — huỷ buổi ghi")
+                cleanupAfterFailure(
+                    "Không thể khởi tạo ghi âm thanh nội bộ trên thiết bị này — đã huỷ buổi ghi để " +
+                        "tránh tạo file hỏng. Hãy thử lại hoặc kiểm tra quyền Micro trong Cài đặt."
+                )
+            }
+        }, START_WATCHDOG_MS)
     }
 
     private fun handleCaptureError(t: Throwable) {
@@ -314,18 +334,30 @@ class ScreenRecordService : Service() {
 
         try {
             if (muxer != null && target != null) {
-                val durationMs = muxer.durationMs()
-                muxer.finalizeAndRelease()
-                val sizeBytes = runCatching { outputPfd?.statSize ?: 0L }.getOrDefault(0L)
-                runCatching { outputPfd?.close() }
-                outputPfd = null
-                val finalSize = target.finalizeOutput(this, sizeBytes)
-                result = StopResult(
-                    uri = target.uri.toString(),
-                    displayPath = target.displayName,
-                    durationMs = durationMs,
-                    sizeBytes = finalSize
-                )
+                if (!muxer.hasStarted()) {
+                    // Muxer chưa bao giờ thực sự start() (thiếu track audio hoặc video) — không có
+                    // nội dung thật nào được ghi. Xoá file dở dang thay vì để lại một video
+                    // trống/hỏng hiển thị trong Gallery như file ghi thành công.
+                    muxer.finalizeAndRelease()
+                    runCatching { outputPfd?.close() }
+                    outputPfd = null
+                    target.deleteIfIncomplete(this)
+                    resultError = resultError
+                        ?: "Ghi hình thất bại — không ghi được dữ liệu (âm thanh nội bộ có thể chưa khởi tạo được). Hãy thử lại."
+                } else {
+                    val durationMs = muxer.durationMs()
+                    muxer.finalizeAndRelease()
+                    val sizeBytes = runCatching { outputPfd?.statSize ?: 0L }.getOrDefault(0L)
+                    runCatching { outputPfd?.close() }
+                    outputPfd = null
+                    val finalSize = target.finalizeOutput(this, sizeBytes)
+                    result = StopResult(
+                        uri = target.uri.toString(),
+                        displayPath = target.displayName,
+                        durationMs = durationMs,
+                        sizeBytes = finalSize
+                    )
+                }
             }
         } catch (t: Throwable) {
             Log.e(TAG, "Lỗi khi hoàn tất file ghi hình", t)
@@ -350,21 +382,34 @@ class ScreenRecordService : Service() {
         cb?.invoke(result, if (result == null) resultError else null)
     }
 
-    private fun cleanupAfterFailure() {
-        runCatching { screenEncoder?.release() }
-        runCatching { audioCapture?.release() }
-        runCatching { muxerController?.finalizeAndRelease() }
-        runCatching { outputPfd?.close() }
-        outputPfd = null
-        runCatching { outputTarget?.deleteIfIncomplete(this) }
-        screenEncoder = null
-        audioCapture = null
-        muxerController = null
-        outputTarget = null
-        releaseProjection()
-        RecordingStateHolder.reset(this)
-        stopForegroundCompat()
-        stopSelf()
+    private fun cleanupAfterFailure(reason: String? = null) {
+        mainHandler.removeCallbacks(tickerRunnable)
+        val encoder = screenEncoder
+        val audio = audioCapture
+        // Dừng nguồn trước rồi mới release, tránh đụng độ với luồng nền của AudioCapture
+        // nếu nó vẫn đang chạy (ví dụ watchdog huỷ một buổi ghi đang diễn ra).
+        runCatching { encoder?.signalEndOfStream() }
+        runCatching { audio?.stop() }
+        Thread {
+            runCatching { audio?.awaitFinished(1500) }
+            Thread.sleep(100)
+            mainHandler.post {
+                runCatching { encoder?.release() }
+                runCatching { audio?.release() }
+                runCatching { muxerController?.finalizeAndRelease() }
+                runCatching { outputPfd?.close() }
+                outputPfd = null
+                runCatching { outputTarget?.deleteIfIncomplete(this) }
+                screenEncoder = null
+                audioCapture = null
+                muxerController = null
+                outputTarget = null
+                releaseProjection()
+                RecordingStateHolder.reset(this, reason)
+                stopForegroundCompat()
+                stopSelf()
+            }
+        }.start()
     }
 
     private fun releaseProjection() {
@@ -413,5 +458,6 @@ class ScreenRecordService : Service() {
 
     companion object {
         private const val TAG = "ScreenRecordService"
+        private const val START_WATCHDOG_MS = 5000L
     }
 }

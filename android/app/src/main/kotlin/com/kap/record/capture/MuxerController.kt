@@ -81,6 +81,9 @@ class MuxerController(pfd: ParcelFileDescriptor) {
 
     fun isFullyDone(): Boolean = synchronized(lock) { videoDone && audioDone }
 
+    /** true khi MediaMuxer.start() đã thực sự được gọi (cả 2 track đã sẵn sàng). */
+    fun hasStarted(): Boolean = synchronized(lock) { started }
+
     fun durationMs(): Long = maxPresentationUs / 1000
 
     fun finalizeAndRelease() {
