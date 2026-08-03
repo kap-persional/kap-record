@@ -117,20 +117,22 @@ class _QualityPicker<T> extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      child: Column(
-        children: values
-            .map(
-              (v) => RadioListTile<T>(
-                value: v,
-                groupValue: selected,
-                onChanged: (value) {
-                  if (value != null) onSelected(value);
-                },
-                title: Text(labelOf(v)),
-                subtitle: Text(descriptionOf(v)),
-              ),
-            )
-            .toList(),
+      child: RadioGroup<T>(
+        groupValue: selected,
+        onChanged: (value) {
+          if (value != null) onSelected(value);
+        },
+        child: Column(
+          children: values
+              .map(
+                (v) => RadioListTile<T>(
+                  value: v,
+                  title: Text(labelOf(v)),
+                  subtitle: Text(descriptionOf(v)),
+                ),
+              )
+              .toList(),
+        ),
       ),
     );
   }

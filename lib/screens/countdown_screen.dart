@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import '../models/quality_preset.dart';
 import '../providers/recorder_provider.dart';
 import '../providers/settings_provider.dart';
 import '../widgets/countdown_overlay.dart';
