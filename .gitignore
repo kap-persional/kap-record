@@ -1,0 +1,33 @@
+# Flutter/Dart
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+pubspec.lock
+
+# Android
+android/local.properties
+android/.gradle/
+android/gradle/wrapper/gradle-wrapper.jar.sha256
+android/app/debug/
+android/app/profile/
+android/app/release/
+android/captures/
+android/.cxx/
+*.jks
+*.keystore
+key.properties
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+
+# Symbols
+app.*.symbols

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">KapRecord</string>
+    <string name="tile_label">Quay màn hình</string>
+    <string name="tile_label_recording">Đang quay</string>
+    <string name="tile_label_paused">Đã tạm dừng</string>
+
+    <string name="notification_channel_name">Ghi màn hình</string>
+    <string name="notification_channel_description">Thông báo trạng thái khi đang ghi màn hình</string>
+
+    <string name="notification_armed_title">Chuẩn bị ghi màn hình…</string>
+    <string name="notification_armed_text">Sắp bắt đầu quay</string>
+    <string name="notification_recording_title">Đang ghi màn hình</string>
+    <string name="notification_paused_title">Đã tạm dừng</string>
+
+    <string name="action_pause">Tạm dừng</string>
+    <string name="action_resume">Tiếp tục</string>
+    <string name="action_stop">Dừng</string>
+</resources>
