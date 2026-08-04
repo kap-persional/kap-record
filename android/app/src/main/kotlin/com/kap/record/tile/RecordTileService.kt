@@ -35,7 +35,13 @@ class RecordTileService : TileService(), RecordingStateHolder.Listener {
         }
     }
 
-    override fun onStateChanged(state: RecordingState, isPaused: Boolean, elapsedMs: Long, error: String?) {
+    override fun onStateChanged(
+        state: RecordingState,
+        isPaused: Boolean,
+        elapsedMs: Long,
+        error: String?,
+        audioLikelySilent: Boolean
+    ) {
         updateTile()
     }
 
