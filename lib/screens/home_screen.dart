@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 
 import '../models/quality_preset.dart';
@@ -19,6 +20,15 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _stopping = false;
 
   Future<void> _onRecordPressed() async {
+    final micReady = await _ensureMicrophonePermission();
+    if (!micReady || !mounted) return;
+    // Quyền Thông báo không bắt buộc để ghi hình (chỉ ảnh hưởng việc hiện thông báo trạng thái
+    // khi đang ghi), nên chỉ xin thêm chứ không chặn luồng nếu bị từ chối.
+    if (await Permission.notification.status.then((s) => !s.isGranted)) {
+      await Permission.notification.request();
+    }
+    if (!mounted) return;
+
     final recorder = context.read<RecorderProvider>();
     final granted = await recorder.requestConsent();
     if (!granted) {
@@ -32,6 +42,60 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) {
       await Navigator.of(context).pushNamed('/countdown');
     }
+  }
+
+  /// Kiểm tra/xin quyền Micro TRƯỚC khi chạy qua cả luồng xin đồng ý MediaProjection +
+  /// đếm ngược — nếu thiếu quyền này thì ghi hình chắc chắn thất bại (bắt buộc theo API
+  /// dù app không dùng micro để nghe), nên chặn sớm ngay tại đây thay vì để lỗi hiện ra
+  /// sau khi người dùng đã chờ hết cả đếm ngược.
+  Future<bool> _ensureMicrophonePermission() async {
+    var status = await Permission.microphone.status;
+    if (status.isGranted) return true;
+
+    status = await Permission.microphone.request();
+    if (status.isGranted) return true;
+    if (!mounted) return false;
+
+    if (status.isPermanentlyDenied) {
+      await _showMicPermissionDeniedDialog();
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Cần cấp quyền Micro để ghi được âm thanh nội bộ (không dùng để nghe qua micro thật)',
+          ),
+        ),
+      );
+    }
+    return false;
+  }
+
+  Future<void> _showMicPermissionDeniedDialog() {
+    return showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Cần quyền Micro'),
+        content: const Text(
+          'KapRecord cần quyền "Micro" theo yêu cầu của hệ thống Android để ghi được âm thanh '
+          'nội bộ (nhạc, video đang phát trên máy) — ứng dụng KHÔNG dùng micro thật để nghe.\n\n'
+          'Bạn đã từ chối quyền này trước đó nên Android sẽ không tự hiện hộp thoại xin quyền '
+          'nữa — hãy vào Cài đặt ứng dụng để cấp quyền thủ công.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Đóng'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              openAppSettings();
+            },
+            child: const Text('Mở Cài đặt'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _onStopPressed() async {

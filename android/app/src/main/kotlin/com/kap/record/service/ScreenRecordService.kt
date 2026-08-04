@@ -17,6 +17,7 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import com.kap.record.Constants
+import com.kap.record.describeForUser
 import com.kap.record.capture.AudioCapture
 import com.kap.record.capture.AudioQuality
 import com.kap.record.capture.MuxerController
@@ -215,7 +216,7 @@ class ScreenRecordService : Service() {
         } catch (t: Throwable) {
             Log.e(TAG, "Không thể bắt đầu ghi hình", t)
             cleanupAfterFailure()
-            callback(false, t.message ?: "Không thể bắt đầu ghi hình")
+            callback(false, t.describeForUser())
         }
     }
 
@@ -244,7 +245,7 @@ class ScreenRecordService : Service() {
             if (RecordingStateHolder.state == RecordingState.RECORDING ||
                 RecordingStateHolder.state == RecordingState.PAUSED
             ) {
-                performStop(null, error = t.message ?: "Lỗi không xác định khi ghi hình")
+                performStop(null, error = t.describeForUser())
             }
         }
     }
@@ -361,7 +362,7 @@ class ScreenRecordService : Service() {
             }
         } catch (t: Throwable) {
             Log.e(TAG, "Lỗi khi hoàn tất file ghi hình", t)
-            resultError = t.message ?: "Lỗi khi lưu file"
+            resultError = t.describeForUser()
             runCatching { outputPfd?.close() }
             outputPfd = null
             runCatching { target?.deleteIfIncomplete(this) }

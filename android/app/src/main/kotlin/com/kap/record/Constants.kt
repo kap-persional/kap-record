@@ -38,3 +38,15 @@ object Constants {
     const val MOVIES_RELATIVE_PATH = "Movies/KapRecord"
     const val MIME_TYPE_MP4 = "video/mp4"
 }
+
+/**
+ * Mô tả lỗi để hiện cho người dùng/ghi log — LUÔN kèm tên lớp exception ngay cả khi có
+ * [Throwable.message], vì các mã lỗi hệ thống (MediaCodec, AudioRecord...) đôi khi có message
+ * rất chung chung hoặc null; tên lớp exception giúp chẩn đoán nhanh hơn nhiều ở lần báo lỗi kế
+ * tiếp thay vì phải đoán mò không có log thiết bị.
+ */
+fun Throwable.describeForUser(): String {
+    val msg = message
+    val className = this::class.simpleName ?: "Exception"
+    return if (msg.isNullOrBlank()) "Lỗi $className" else "$msg ($className)"
+}

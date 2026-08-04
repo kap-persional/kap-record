@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.kap.record.Constants
@@ -28,25 +29,34 @@ class ProjectionTrampolineActivity : Activity() {
     }
 
     private fun proceed() {
-        val missing = missingPermissions()
-        if (missing.isNotEmpty()) {
-            if (!permissionRequested) {
-                permissionRequested = true
-                ActivityCompat.requestPermissions(this, missing.toTypedArray(), REQUEST_CODE_PERMISSIONS)
-            } else {
-                // Người dùng vừa từ chối quyền bắt buộc — không thể ghi âm thanh nội bộ.
-                finish()
-            }
+        val missing = missingRequestablePermissions()
+        if (missing.isNotEmpty() && !permissionRequested) {
+            permissionRequested = true
+            ActivityCompat.requestPermissions(this, missing.toTypedArray(), REQUEST_CODE_PERMISSIONS)
             return
         }
+
+        // RECORD_AUDIO là bắt buộc để ghi được âm thanh nội bộ; POST_NOTIFICATIONS chỉ ảnh
+        // hưởng việc hiện thông báo trạng thái nên không chặn tiếp tục ghi hình nếu thiếu.
+        if (isRecordAudioMissing()) {
+            Toast.makeText(
+                this,
+                "Cần cấp quyền Micro (Cài đặt ứng dụng KapRecord) để ghi được âm thanh nội bộ",
+                Toast.LENGTH_LONG
+            ).show()
+            finish()
+            return
+        }
+
         requestProjection()
     }
 
-    private fun missingPermissions(): List<String> {
+    private fun isRecordAudioMissing(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+
+    private fun missingRequestablePermissions(): List<String> {
         val list = mutableListOf<String>()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
+        if (isRecordAudioMissing()) {
             list.add(Manifest.permission.RECORD_AUDIO)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
