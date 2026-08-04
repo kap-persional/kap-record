@@ -48,9 +48,9 @@ UI Screens / Widgets                ScreenRecordService (ForegroundService)
 | `models/save_location.dart` | `SaveFolderResult` |
 | `services/recorder_channel.dart` | Bọc MethodChannel + EventChannel, singleton `RecorderChannel.instance` |
 | `services/settings_service.dart` | Đọc/ghi SharedPreferences cho cài đặt |
-| `providers/recorder_provider.dart` | `RecorderProvider` (ChangeNotifier), lắng nghe EventChannel |
+| `providers/recorder_provider.dart` | `RecorderProvider` (ChangeNotifier), lắng nghe EventChannel, tự resubscribe khi stream lỗi |
 | `providers/settings_provider.dart` | `SettingsProvider` (ChangeNotifier), persist qua `SettingsService` |
-| `screens/home_screen.dart` | Màn hình chính: nút Quay/Tạm dừng/Tiếp tục/Dừng, đồng hồ |
+| `screens/home_screen.dart` | Màn hình chính: nút Quay/Tạm dừng/Tiếp tục/Dừng, đồng hồ, banner cảnh báo audio im lặng |
 | `screens/settings_screen.dart` | Chọn chất lượng video/âm thanh, thư mục lưu, đếm ngược |
 | `screens/countdown_screen.dart` | Màn hình đếm ngược (route `/countdown`) |
 | `screens/onboarding_permissions_screen.dart` | Màn hình giải thích + xin quyền lần đầu |
@@ -67,14 +67,14 @@ UI Screens / Widgets                ScreenRecordService (ForegroundService)
 | `projection/ProjectionTrampolineActivity.kt` | Activity trong suốt, xin quyền MediaProjection từ Tile |
 | `projection/CountdownActivity.kt` | FlutterActivity riêng, `initialRoute = "/countdown"` khi mở từ Tile |
 | `tile/RecordTileService.kt` | Quick Settings Tile (IDLE→ARMED/RECORDING→IDLE) |
-| `service/ScreenRecordService.kt` | Foreground service, state machine chính |
-| `capture/ScreenEncoder.kt` | VirtualDisplay + H.264 MediaCodec (surface input, async callback) |
-| `capture/AudioCapture.kt` | `AudioPlaybackCaptureConfiguration` + AudioRecord + AAC MediaCodec |
+| `service/ScreenRecordService.kt` | Foreground service, state machine chính, watchdog theo session token, DisplayListener xoay màn hình, cleanup khi bị OS/OEM kill |
+| `capture/ScreenEncoder.kt` | VirtualDisplay + H.264 MediaCodec (surface input, async callback), `resize()` khi xoay màn hình |
+| `capture/AudioCapture.kt` | `AudioPlaybackCaptureConfiguration` + AudioRecord + AAC MediaCodec, phát hiện PCM gần như im lặng |
 | `capture/MuxerController.kt` | MediaMuxer, đồng bộ 2 track trước khi start() |
-| `capture/QualityPresets.kt` | `VideoQuality`, `AudioQuality` enums + `computeCaptureDimensions()` |
+| `capture/QualityPresets.kt` | `VideoQuality`, `AudioQuality` enums + `computeCaptureDimensions()` + `isVideoConfigSupported()` |
 | `output/OutputFileManager.kt` | Tạo file qua MediaStore (Gallery) hoặc SAF (thư mục tùy chọn) |
 | `state/RecordingState.kt` | Enum: IDLE, ARMED, RECORDING, PAUSED, STOPPING |
-| `state/RecordingStateHolder.kt` | Singleton trạng thái, listener pattern, persist SharedPreferences |
+| `state/RecordingStateHolder.kt` | Singleton trạng thái, listener pattern, persist SharedPreferences, cờ `audioLikelySilent` |
 | `notification/RecordingNotification.kt` | Xây dựng Notification (ARMED, RECORDING, PAUSED) với các nút hành động |
 | `channel/RecorderChannelHandler.kt` | Xử lý MethodChannel/EventChannel, bindService với retry |
 
@@ -93,7 +93,7 @@ IDLE
   ▼
 ARMED
   │─── startRecording() ─────► encoder.start() + audio.start()
-  │                             scheduleStartWatchdog(5s)
+  │                             scheduleStartWatchdog(5s, sessionId)
   ▼
 RECORDING ◄──────────────────────────────────────────────┐
   │                                                       │
@@ -128,7 +128,8 @@ IDLE
 - Surface input: MediaCodec tự lấy khung hình từ VirtualDisplay, không cần cấp buffer input thủ công
 - **Tạm dừng**: `virtualDisplay.setSurface(null)` — encoder vẫn sống, muxer tiếp tục nhận frame sau resume
 - **Dừng**: `codec.signalEndOfInputStream()` → chờ buffer EOS qua callback → `ScreenRecordService.waitForVideoDrain()`
-- Release: hủy VirtualDisplay trước, rồi codec.stop() + codec.release() + inputSurface.release() + handlerThread.quitSafely()
+- **Xoay màn hình khi đang ghi**: `resize(width, height, densityDpi)` gọi `virtualDisplay.resize(...)` — chỉ đổi kích thước logic của display, KHÔNG đổi kích thước Surface/codec (MediaCodec surface-input không hỗ trợ đổi format sau `configure()`). Nếu tỷ lệ khung hình đổi (dọc↔ngang) video có thể bị méo/co kéo, nhưng không crash.
+- Release: hủy VirtualDisplay trước → `handlerThread.quitSafely()` + `join(500)` (đợi HandlerThread xử lý xong các callback đã xếp hàng và thoát hẳn) → rồi mới `codec.stop()` + `codec.release()` + `inputSurface.release()`. Thứ tự này (trước đây khác) tránh race giữa luồng callback `onOutputBufferAvailable` và `stop()/release()` chạy trên luồng khác.
 
 ### AudioCapture (`capture/AudioCapture.kt`)
 
@@ -138,11 +139,14 @@ IDLE
 - Detect lỗi liên tục: `consecutiveErrors >= 50` → gọi `onCodecError()`
 - **Tạm dừng**: `audioRecord.stop()` (không dừng thread hay codec)
 - **Dừng**: `running.set(false)` → vòng lặp tự thoát, gửi EOS qua codec rồi drain
+- **`awaitFinished(timeoutMs)`**: trả về `Boolean` (trước đây `Unit`) — `true` nếu luồng nền thực sự thoát trong thời gian chờ
+- **`release()`**: nếu `thread?.isAlive == true` (luồng nền chưa thoát dù đã `stop()` + `awaitFinished()`, ví dụ `AudioRecord.read()` kẹt trên driver OEM lỗi) → **bỏ qua release hoàn toàn**, không đụng `codec`/`audioRecord` — tránh race/crash với `runLoop()` vẫn đang chạy trên luồng khác. Đánh đổi: rò rỉ tài nguyên nhỏ trong trường hợp hiếm này, chấp nhận được so với crash.
+- **Phát hiện audio gần như im lặng**: trong 5 giây đầu (`SILENCE_CHECK_WINDOW_US`, cùng mốc với watchdog), tính biên độ PCM 16-bit trung bình; nếu dưới ngưỡng (`SILENCE_AMPLITUDE_THRESHOLD = 50`) → gọi `onSilentAudioDetected()` (khác `onCodecError`, KHÔNG huỷ buổi ghi, chỉ cảnh báo — xem mục "Cảnh báo audio im lặng" bên dưới).
 
 ### MuxerController (`capture/MuxerController.kt`)
 
 - MediaMuxer chỉ `start()` khi **cả hai** track (video + audio) đã `addTrack()` xong
-- `writeSample()` bỏ qua nếu `!started` → tất cả frame bị lặng lẽ bỏ qua nếu audio không sẵn sàng
+- `writeSample()` bỏ qua nếu `!started` → tất cả frame bị lặng lẽ bỏ qua nếu audio không sẵn sàng; nếu `muxer.writeSampleData()` tự nó lỗi (dù `started`), lỗi được log rõ (`Log.e`) thay vì nuốt hoàn toàn im lặng như trước — hành vi vẫn là bỏ qua sample đó và tiếp tục, chỉ thêm log chẩn đoán
 - Mỗi track tự trừ đi timestamp của mẫu đầu tiên → relative timestamp
 - **`hasStarted()`**: public getter để watchdog và finalizeRecording kiểm tra
 - **`videoDone`**: flag cho `waitForVideoDrain()` ở ScreenRecordService biết khi nào drain xong
@@ -152,6 +156,20 @@ IDLE
 - Sau 5 giây kể từ khi `encoder.start()` + `audio.start()`, kiểm tra `muxer.hasStarted()`
 - Nếu muxer chưa start → `cleanupAfterFailure(reason)` → huỷ file dở dang, reset về IDLE với thông báo lỗi rõ ràng
 - Mục đích: ngăn ghi hình "âm thầm" không có dữ liệu rồi tạo file hỏng
+- **Session token**: mỗi lần `startRecordingRequest()` chạy, `recordingSessionId` tăng 1 và watchdog capture giá trị đó. Watchdog chỉ hành động nếu `sessionId == recordingSessionId` hiện tại — tránh trường hợp dừng rồi bắt đầu lại rất nhanh (trong vòng 5s) khiến watchdog của buổi ghi cũ huỷ nhầm buổi ghi mới đang chạy tốt.
+- **`cleanupAfterFailure()`** giờ chờ `waitForVideoDrain()` (giống hệt luồng dừng thành công) trước khi release encoder trên background thread, thay vì chỉ `Thread.sleep(100)` cố định như trước — tránh release encoder khi callback MediaCodec vẫn còn xử lý buffer cuối.
+
+### Xoay màn hình khi đang ghi
+
+`ScreenRecordService` đăng ký `DisplayManager.DisplayListener` khi bắt đầu ghi (`registerRotationListener()`), huỷ đăng ký khi dừng/onDestroy. Khi phát hiện `Display.DEFAULT_DISPLAY` đổi trong lúc RECORDING/PAUSED, tính lại `computeCaptureDimensions()` theo kích thước màn hình mới và gọi `ScreenEncoder.resize()`. Đây là fix "không crash khi xoay máy" — KHÔNG đảm bảo video luôn đúng tỷ lệ hoàn hảo ở mọi hướng xoay (xem [[#Vấn đề còn tồn tại / Chưa xác nhận]]).
+
+### Kiểm tra thiết bị hỗ trợ chất lượng video (`isVideoConfigSupported`)
+
+Trước khi tạo `ScreenEncoder`, `startRecordingRequest()` gọi `isVideoConfigSupported(width, height, quality)` (dùng `MediaCodecList.findEncoderForFormat()`) để xác nhận thiết bị hỗ trợ cấu hình H.264 đã chọn — đặc biệt quan trọng với mức ULTRA (4K/60fps). Nếu không hỗ trợ, trả lỗi rõ ràng cho Flutter ("hãy chọn mức chất lượng thấp hơn") thay vì để crash tại `codec.configure()`.
+
+### Cảnh báo audio im lặng (`audioLikelySilent`)
+
+`RecordingStateHolder.audioLikelySilent` (Boolean) là cờ cảnh báo — KHÔNG phải lỗi, KHÔNG huỷ buổi ghi — được set `true` khi `AudioCapture` phát hiện PCM gần như im lặng trong 5 giây đầu buổi ghi. Đẩy qua EventChannel cùng `state/elapsedSeconds/isPaused/error`, Flutter hiện banner cam trên `HomeScreen` khi cờ này `true` và đang RECORDING/PAUSED. Đây là **heuristic giảm nhẹ**, không phải fix tận gốc, cho vấn đề "âm thanh nội bộ không ghi được trên một số máy Samsung/OEM" (xem mục Vấn đề còn tồn tại).
 
 ### RecorderChannelHandler — bindService retry (`channel/RecorderChannelHandler.kt`)
 
@@ -244,7 +262,7 @@ IDLE
 | `pickSaveFolder` | — | `{uri, displayName}` hoặc null |
 | `getCurrentState` | — | state map |
 
-**EventChannel (Native → Dart)**: đẩy `{state, elapsedSeconds, isPaused, error}` mỗi khi trạng thái thay đổi (và mỗi giây khi đang ghi).
+**EventChannel (Native → Dart)**: đẩy `{state, elapsedSeconds, isPaused, error, audioLikelySilent}` mỗi khi trạng thái thay đổi (và mỗi giây khi đang ghi). `audioLikelySilent` là cờ cảnh báo heuristic — xem mục "Cảnh báo audio im lặng" ở trên.
 
 ---
 
@@ -267,7 +285,7 @@ File: `.github/workflows/build.yml`
    - `adb install`, `am start`, `sleep 10`, kiểm tra `pidof` — nếu không tìm thấy process → exit 1
 5. Upload `logcat.txt` (kể cả khi lỗi)
 
-**Lưu ý**: Emulator **không mô phỏng** `AudioPlaybackCaptureConfiguration` đúng — chỉ smoke test crash/startup, không xác nhận âm thanh nội bộ.
+**Lưu ý**: Emulator **không mô phỏng** `AudioPlaybackCaptureConfiguration` đúng — chỉ smoke test crash/startup, không xác nhận âm thanh nội bộ. Không xác nhận được cảnh báo audio-im-lặng, xoay màn hình khi ghi, hay hành vi khi OS/OEM kill service — các phần này cần test tay trên thiết bị thật.
 
 ---
 
@@ -301,20 +319,58 @@ File: `.github/workflows/build.yml`
 **Nguyên nhân**: `reactivecircus/android-emulator-runner` chạy mỗi dòng YAML `script:` như `sh -c` riêng biệt → `if/then/fi` multi-line không hoạt động.  
 **Sửa**: Chuyển script vào `.github/scripts/emulator_smoke_test.sh`, gọi `bash <file>`.
 
+### Lỗi 6: Watchdog có thể huỷ nhầm buổi ghi mới bắt đầu ngay sau khi dừng buổi trước
+**Nguyên nhân**: `scheduleStartWatchdog()` chỉ kiểm tra `RecordingStateHolder.state == RECORDING`, không phân biệt buổi ghi nào — nếu dừng rồi bắt đầu lại trong vòng 5s, watchdog cũ có thể huỷ buổi ghi mới đang chạy tốt.  
+**Sửa**: Thêm `recordingSessionId` tăng dần mỗi lần `startRecordingRequest()`, watchdog capture và so khớp session id trước khi hành động.
+
+### Lỗi 7: Race điều kiện khi release AudioCapture/ScreenEncoder lúc dừng ghi
+**Nguyên nhân**: `AudioCapture.release()`/`ScreenEncoder.release()` có thể đụng `codec`/`audioRecord` đồng thời với luồng nền (`runLoop()`/MediaCodec callback) vẫn đang thao tác trên cùng object, đặc biệt khi luồng nền bị kẹt (driver OEM lỗi) hoặc chưa kịp thoát.  
+**Sửa**: `AudioCapture.awaitFinished()` trả về `Boolean` cho biết luồng có thực sự thoát không; `release()` bỏ qua hoàn toàn nếu luồng còn sống (chấp nhận rò rỉ nhỏ, tránh crash). `ScreenEncoder.release()` đợi `handlerThread.join(500)` sau `quitSafely()` trước khi gọi `codec.stop()/release()`. `cleanupAfterFailure()` cũng chờ `waitForVideoDrain()` trước khi release, giống luồng dừng thành công.
+
+### Lỗi 8: Không xử lý xoay màn hình khi đang ghi
+**Nguyên nhân**: `VirtualDisplay` tạo 1 lần với kích thước cố định lúc bắt đầu ghi, không có `DisplayListener`.  
+**Sửa**: `ScreenRecordService` đăng ký `DisplayManager.DisplayListener`, gọi `ScreenEncoder.resize()` khi xoay màn hình trong lúc RECORDING/PAUSED. Xem mục "Xoay màn hình khi đang ghi" — mục tiêu chính là không crash, không đảm bảo tỷ lệ khung hình hoàn hảo ở mọi trường hợp.
+
+### Lỗi 9: ULTRA quality có thể crash trên thiết bị không hỗ trợ
+**Nguyên nhân**: Không kiểm tra `MediaCodecInfo.CodecCapabilities` trước `codec.configure()`.  
+**Sửa**: `isVideoConfigSupported()` (dùng `MediaCodecList.findEncoderForFormat()`) kiểm tra trước khi tạo `ScreenEncoder`, trả lỗi rõ ràng nếu không hỗ trợ.
+
+### Lỗi 10: Mồ côi tài nguyên/file khi OS hoặc OEM (MIUI/Huawei) kill service giữa buổi ghi
+**Nguyên nhân**: `onDestroy()` trước đây chỉ gỡ `tickerRunnable`, không release encoder/audio/muxer, không xoá bản ghi MediaStore dở dang (`IS_PENDING=1`).  
+**Sửa**: `onDestroy()` giờ cố dọn tài nguyên native + xoá file dở dang tốt nhất có thể nếu state đang RECORDING/PAUSED/STOPPING lúc bị huỷ. Không thể phục hồi nội dung đã ghi trong trường hợp này — chỉ tránh mồ côi tài nguyên/file "đang chờ" vô hình trong Gallery.
+
+### Lỗi 11 (Flutter): Pause/Resume không bắt lỗi, có thể bấm đúp
+**Nguyên nhân**: `onPause`/`onResume` gọi thẳng Future không await/try-catch, không có cờ chặn bấm đúp như nút Dừng.  
+**Sửa**: `HomeScreen._onPauseResumePressed()` bọc try/catch + cờ `_pauseResumeBusy`, hiện SnackBar khi lỗi.
+
+### Lỗi 12 (Flutter): EventChannel lỗi bị nuốt âm thầm, UI đứng hình
+**Nguyên nhân**: `RecorderProvider` lắng nghe `stateStream` với `onError: (Object _) {}` rỗng.  
+**Sửa**: `RecorderProvider._onStreamError()` báo lỗi qua `takePendingError()` rồi tự huỷ + subscribe lại stream.
+
+### Lỗi 13 (Flutter): Race huỷ đếm ngược vẫn có thể gọi startRecording()
+**Nguyên nhân**: `_startNow()` (lên lịch qua `addPostFrameCallback`) không có cờ đánh dấu đã huỷ, chỉ dựa vào thứ tự FIFO của MethodChannel.  
+**Sửa**: Thêm cờ `_cancelled` trong `CountdownScreen`, set khi `_cancel()` chạy, kiểm tra đầu `_startNow()`.
+
+### Lỗi 14 (Flutter): Chọn thư mục lưu (SAF) không bắt lỗi, có thể mở nhiều hộp thoại
+**Nguyên nhân**: `_pickFolder()` không try/catch, không có cờ chặn bấm nhiều lần.  
+**Sửa**: Tách `_SaveLocationCard` thành `StatefulWidget` riêng với cờ `_picking` + try/catch trong `settings_screen.dart`.
+
 ---
 
 ## Vấn đề còn tồn tại / Chưa xác nhận
 
-1. **Âm thanh nội bộ không ghi được trên một số máy Samsung/thiết bị OEM**: `AudioRecord` có thể build thành công nhưng không thực sự capture được audio từ `AudioPlaybackCaptureConfiguration`. Đây là vấn đề phần cứng/firmware. Watchdog hiện đã bắt được trường hợp muxer chưa start sau 5s, nhưng nếu AudioRecord đang capture nhưng capture data rỗng (0 byte thực tế) thì watchdog không phát hiện được — cần test trên thiết bị thật để xác nhận.
+1. **Âm thanh nội bộ không ghi được trên một số máy Samsung/thiết bị OEM**: `AudioRecord` có thể build thành công nhưng không thực sự capture được audio từ `AudioPlaybackCaptureConfiguration`. Đây là vấn đề phần cứng/firmware, **chưa có fix tận gốc**. Đã thêm **heuristic cảnh báo** (`audioLikelySilent`, xem mục "Cảnh báo audio im lặng" ở trên): nếu PCM gần như im lặng suốt 5 giây đầu, người dùng được cảnh báo ngay trong lúc ghi thay vì phát hiện ra video câm sau khi ghi xong. Vẫn cần test trên thiết bị thật (đặc biệt Samsung) để xác nhận heuristic này bắt đúng trường hợp lỗi mà không báo nhầm khi người dùng cố ý ghi màn hình im lặng.
 
-2. **Chưa test đủ các kịch bản**:
-   - Xoay màn hình khi đang ghi (kích thước bị khoá tại lúc bắt đầu)
+2. **Chưa test đủ các kịch bản trên thiết bị thật** (đã có code fix/giảm nhẹ, nhưng CI/emulator không xác nhận được):
+   - Xoay màn hình khi đang ghi — đã thêm `DisplayListener` + `resize()` (Lỗi 8), cần xác nhận không crash và chất lượng video chấp nhận được ở các mức xoay khác nhau
    - Ghi dài >10 phút
-   - Các mức chất lượng ULTRA (4K/60fps) trên thiết bị không hỗ trợ
+   - Các mức chất lượng ULTRA (4K/60fps) — đã thêm kiểm tra `isVideoConfigSupported()` (Lỗi 9), cần xác nhận trên thiết bị thật vừa hỗ trợ vừa không hỗ trợ
    - SAF folder sau khi khởi động lại máy
-   - Các thương hiệu kill foreground service (Xiaomi MIUI, Huawei)
+   - Các thương hiệu kill foreground service (Xiaomi MIUI, Huawei) — đã thêm cleanup trong `onDestroy()` (Lỗi 10), cần xác nhận thực tế trên thiết bị các hãng này
 
-3. **Người dùng báo vẫn còn lỗi** (Samsung Galaxy 12): chưa rõ cụ thể là lỗi gì sau các bản sửa mới nhất — cần APK từ commit `2dead47` trở lên để test.
+3. **Người dùng báo vẫn còn lỗi** (Samsung Galaxy 12): chưa rõ cụ thể là lỗi gì sau các bản sửa mới nhất — cần APK từ commit mới nhất (sau các fix Lỗi 6-14) để test lại. Nếu vẫn còn lỗi, cảnh báo `audioLikelySilent` mới thêm có thể giúp thu hẹp xem có phải vấn đề audio-im-lặng hay không.
+
+4. **Chưa làm (đã cân nhắc, quyết định không làm ở lần sửa lỗi gần nhất)**: trộn thêm mic vào audio nội bộ (audio source modes như app tham khảo `AppVideo`), danh sách bản ghi trong app (recording history/library screen).
 
 ---
 
