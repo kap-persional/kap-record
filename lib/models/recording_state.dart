@@ -21,12 +21,14 @@ class RecordingSnapshot {
     required this.elapsedSeconds,
     required this.isPaused,
     this.error,
+    this.audioLikelySilent = false,
   });
 
   final RecorderPhase phase;
   final int elapsedSeconds;
   final bool isPaused;
   final String? error;
+  final bool audioLikelySilent;
 
   static const idleInitial = RecordingSnapshot(
     phase: RecorderPhase.idle,
@@ -40,6 +42,7 @@ class RecordingSnapshot {
       elapsedSeconds: (map['elapsedSeconds'] as num?)?.toInt() ?? 0,
       isPaused: map['isPaused'] as bool? ?? false,
       error: map['error'] as String?,
+      audioLikelySilent: map['audioLikelySilent'] as bool? ?? false,
     );
   }
 }

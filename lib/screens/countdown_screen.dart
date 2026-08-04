@@ -24,6 +24,7 @@ class _CountdownScreenState extends State<CountdownScreen> {
   Timer? _timer;
   late int _remaining;
   bool _starting = false;
+  bool _cancelled = false;
   String? _error;
 
   @override
@@ -46,7 +47,10 @@ class _CountdownScreenState extends State<CountdownScreen> {
   }
 
   Future<void> _startNow() async {
-    if (_starting) return;
+    // Chặn khả năng lệnh startRecording() vẫn được gọi sau khi người dùng đã bấm Huỷ
+    // (ví dụ nếu addPostFrameCallback đã lên lịch đúng lúc _cancel() chạy) — không chỉ
+    // dựa vào thứ tự FIFO của MethodChannel để đảm bảo điều này.
+    if (_starting || _cancelled || !mounted) return;
     setState(() => _starting = true);
     final settings = context.read<SettingsProvider>();
     final recorder = context.read<RecorderProvider>();
@@ -77,6 +81,7 @@ class _CountdownScreenState extends State<CountdownScreen> {
   }
 
   Future<void> _cancel() async {
+    _cancelled = true;
     _timer?.cancel();
     await context.read<RecorderProvider>().cancelArmed();
     _finish();
