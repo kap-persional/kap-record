@@ -1,5 +1,8 @@
 package com.kap.record.capture
 
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
+import android.media.MediaFormat
 import kotlin.math.roundToInt
 
 enum class VideoQuality(
@@ -60,3 +63,22 @@ fun computeCaptureDimensions(realWidth: Int, realHeight: Int, quality: VideoQual
 }
 
 private fun evenFloor(value: Int): Int = if (value % 2 == 0) value else value - 1
+
+/**
+ * Kiểm tra thiết bị có thực sự hỗ trợ mã hoá H.264 ở độ phân giải/bitrate/khung hình đã
+ * chọn hay không TRƯỚC khi tạo MediaCodec. Một số thiết bị không hỗ trợ mức ULTRA
+ * (4K/60fps) và trước đây sẽ ném exception khó hiểu ngay tại codec.configure().
+ */
+fun isVideoConfigSupported(width: Int, height: Int, quality: VideoQuality): Boolean {
+    return try {
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, quality.bitrate)
+            setInteger(MediaFormat.KEY_FRAME_RATE, quality.fps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+        }
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).findEncoderForFormat(format) != null
+    } catch (t: Throwable) {
+        false
+    }
+}
