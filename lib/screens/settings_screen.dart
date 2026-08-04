@@ -10,14 +10,6 @@ import '../services/recorder_channel.dart';
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
-  Future<void> _pickFolder(BuildContext context) async {
-    final result = await RecorderChannel.instance.pickSaveFolder();
-    if (result == null || !context.mounted) return;
-    await context.read<SettingsProvider>().setSaveLocation(
-          SaveLocation(mode: SaveLocationMode.custom, uri: result.uri, displayName: result.displayName),
-        );
-  }
-
   @override
   Widget build(BuildContext context) {
     final settings = context.watch<SettingsProvider>();
@@ -52,21 +44,7 @@ class SettingsScreen extends StatelessWidget {
           ),
           const SizedBox(height: 24),
           const _SectionTitle('Nơi lưu video'),
-          Card(
-            child: ListTile(
-              leading: const Icon(Icons.folder_outlined),
-              title: Text(settings.saveLocation.displayName),
-              subtitle: const Text('Bấm để đổi thư mục lưu'),
-              trailing: settings.saveLocation.mode == SaveLocationMode.custom
-                  ? IconButton(
-                      icon: const Icon(Icons.restore),
-                      tooltip: 'Về mặc định (Thư viện ảnh)',
-                      onPressed: () => context.read<SettingsProvider>().resetToGallery(),
-                    )
-                  : null,
-              onTap: () => _pickFolder(context),
-            ),
-          ),
+          _SaveLocationCard(saveLocation: settings.saveLocation),
           const SizedBox(height: 24),
           const _SectionTitle('Quyền ứng dụng'),
           const _PermissionRow(
@@ -95,6 +73,71 @@ class _SectionTitle extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Text(text, style: Theme.of(context).textTheme.titleMedium),
+    );
+  }
+}
+
+/// Tách riêng thành StatefulWidget (khác với phần còn lại của SettingsScreen, vẫn
+/// StatelessWidget) để có thể chặn double-tap trong lúc hộp thoại chọn thư mục (SAF) đang
+/// mở, và hiện lỗi rõ ràng nếu pickSaveFolder() ném PlatformException — trước đây không có
+/// try/catch lẫn cờ chặn nào.
+class _SaveLocationCard extends StatefulWidget {
+  const _SaveLocationCard({required this.saveLocation});
+
+  final SaveLocation saveLocation;
+
+  @override
+  State<_SaveLocationCard> createState() => _SaveLocationCardState();
+}
+
+class _SaveLocationCardState extends State<_SaveLocationCard> {
+  bool _picking = false;
+
+  Future<void> _pickFolder() async {
+    if (_picking) return;
+    setState(() => _picking = true);
+    try {
+      final result = await RecorderChannel.instance.pickSaveFolder();
+      if (result == null || !mounted) return;
+      await context.read<SettingsProvider>().setSaveLocation(
+            SaveLocation(mode: SaveLocationMode.custom, uri: result.uri, displayName: result.displayName),
+          );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Không thể chọn thư mục lưu: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _picking = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: ListTile(
+        leading: _picking
+            ? const SizedBox(
+                width: 24,
+                height: 24,
+                child: Padding(
+                  padding: EdgeInsets.all(2),
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              )
+            : const Icon(Icons.folder_outlined),
+        title: Text(widget.saveLocation.displayName),
+        subtitle: const Text('Bấm để đổi thư mục lưu'),
+        trailing: widget.saveLocation.mode == SaveLocationMode.custom
+            ? IconButton(
+                icon: const Icon(Icons.restore),
+                tooltip: 'Về mặc định (Thư viện ảnh)',
+                onPressed: _picking ? null : () => context.read<SettingsProvider>().resetToGallery(),
+              )
+            : null,
+        onTap: _picking ? null : _pickFolder,
+      ),
     );
   }
 }

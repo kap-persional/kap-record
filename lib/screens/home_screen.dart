@@ -18,6 +18,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   bool _stopping = false;
+  bool _pauseResumeBusy = false;
 
   Future<void> _onRecordPressed() async {
     final micReady = await _ensureMicrophonePermission();
@@ -144,6 +145,24 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// Bọc chung cho Pause/Resume: chặn bấm đúp trong lúc lệnh trước còn đang chạy, và báo
+  /// lỗi rõ ràng nếu native ném PlatformException thay vì để rơi mất không ai biết.
+  Future<void> _onPauseResumePressed(Future<void> Function() action) async {
+    if (_pauseResumeBusy) return;
+    setState(() => _pauseResumeBusy = true);
+    try {
+      await action();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Thao tác thất bại: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _pauseResumeBusy = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final recorder = context.watch<RecorderProvider>();
@@ -180,6 +199,10 @@ class _HomeScreenState extends State<HomeScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             TimerDisplay(elapsedSeconds: recorder.elapsedSeconds, isPaused: recorder.isPaused),
+            if (isActive && recorder.audioLikelySilent) ...[
+              const SizedBox(height: 16),
+              const _SilentAudioBanner(),
+            ],
             const SizedBox(height: 40),
             if (_stopping)
               const Column(
@@ -194,8 +217,8 @@ class _HomeScreenState extends State<HomeScreen> {
               RecordButton(
                 phase: phase,
                 onStart: _onRecordPressed,
-                onPause: () => context.read<RecorderProvider>().pause(),
-                onResume: () => context.read<RecorderProvider>().resume(),
+                onPause: () => _onPauseResumePressed(() => context.read<RecorderProvider>().pause()),
+                onResume: () => _onPauseResumePressed(() => context.read<RecorderProvider>().resume()),
                 onStop: _onStopPressed,
               ),
             const SizedBox(height: 32),
@@ -209,6 +232,38 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
             ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SilentAudioBanner extends StatelessWidget {
+  const _SilentAudioBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: Colors.orange.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.orange),
+        ),
+        child: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.orange),
+            SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Có vẻ chưa phát hiện âm thanh nội bộ nào — kiểm tra ứng dụng đang phát có '
+                'âm lượng không. Một số thiết bị có thể không hỗ trợ ghi âm thanh nội bộ.',
+                style: TextStyle(fontSize: 13),
+              ),
+            ),
           ],
         ),
       ),
