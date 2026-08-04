@@ -5,6 +5,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.hardware.display.DisplayManager
 import android.media.MediaCodec
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -15,6 +16,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
+import android.view.Display
 import android.view.WindowManager
 import com.kap.record.Constants
 import com.kap.record.describeForUser
@@ -24,6 +26,7 @@ import com.kap.record.capture.MuxerController
 import com.kap.record.capture.ScreenEncoder
 import com.kap.record.capture.VideoQuality
 import com.kap.record.capture.computeCaptureDimensions
+import com.kap.record.capture.isVideoConfigSupported
 import com.kap.record.notification.RecordingNotification
 import com.kap.record.output.OutputFileManager
 import com.kap.record.output.RecordingOutputTarget
@@ -61,6 +64,12 @@ class ScreenRecordService : Service() {
     private var audioQuality = AudioQuality.MEDIUM
     private var stopCallback: ((StopResult?, String?) -> Unit)? = null
     private var recordingStartWallClockMs = 0L
+
+    // Token tăng dần mỗi lần bắt đầu một buổi ghi mới — dùng để watchdog phân biệt được
+    // buổi ghi nó đang theo dõi có còn là buổi ghi hiện tại hay không (tránh trường hợp
+    // dừng rồi bắt đầu lại rất nhanh khiến watchdog cũ huỷ nhầm buổi ghi mới).
+    private var recordingSessionId = 0
+    private var displayListener: DisplayManager.DisplayListener? = null
 
     private val tickerRunnable = object : Runnable {
         override fun run() {
@@ -123,6 +132,7 @@ class ScreenRecordService : Service() {
         if (projection == null) {
             Log.e(TAG, "Không lấy được MediaProjection")
             RecordingStateHolder.reset(this, "Không thể khởi tạo quyền ghi màn hình")
+            stopForegroundCompat()
             stopSelf()
             return
         }
@@ -174,6 +184,18 @@ class ScreenRecordService : Service() {
         audioQuality = AudioQuality.fromWireName(audioQualityWire)
 
         try {
+            val metrics = realDisplayMetrics()
+            val dimensions = computeCaptureDimensions(metrics.widthPixels, metrics.heightPixels, videoQuality)
+
+            if (!isVideoConfigSupported(dimensions.width, dimensions.height, videoQuality)) {
+                callback(
+                    false,
+                    "Thiết bị này không hỗ trợ chất lượng video \"${videoQuality.wireName}\" đã chọn — " +
+                        "hãy thử chọn mức chất lượng thấp hơn trong Cài đặt"
+                )
+                return
+            }
+
             val target = OutputFileManager.createTarget(this, saveMode, customUri)
             outputTarget = target
             val pfd = target.openFileDescriptor(this)
@@ -181,8 +203,8 @@ class ScreenRecordService : Service() {
             val muxer = MuxerController(pfd)
             muxerController = muxer
 
-            val metrics = realDisplayMetrics()
-            val dimensions = computeCaptureDimensions(metrics.widthPixels, metrics.heightPixels, videoQuality)
+            recordingSessionId += 1
+            val sessionId = recordingSessionId
 
             val encoder = ScreenEncoder(
                 mediaProjection = projection,
@@ -199,7 +221,10 @@ class ScreenRecordService : Service() {
                 quality = audioQuality,
                 onFormatReady = { format -> muxer.addAudioTrack(format) },
                 onEncodedFrame = { track, buffer, info -> muxer.writeSample(track, buffer, info) },
-                onCodecError = { t -> handleCaptureError(t) }
+                onCodecError = { t -> handleCaptureError(t) },
+                onSilentAudioDetected = {
+                    mainHandler.post { RecordingStateHolder.markAudioLikelySilent(this) }
+                }
             )
             screenEncoder = encoder
             audioCapture = audio
@@ -211,7 +236,8 @@ class ScreenRecordService : Service() {
             RecordingStateHolder.markRecordingStarted(this)
             mainHandler.post(tickerRunnable)
             mainHandler.post { updateNotificationTick() }
-            scheduleStartWatchdog(muxer)
+            registerRotationListener()
+            scheduleStartWatchdog(muxer, sessionId)
             callback(true, null)
         } catch (t: Throwable) {
             Log.e(TAG, "Không thể bắt đầu ghi hình", t)
@@ -226,10 +252,17 @@ class ScreenRecordService : Service() {
      * cụ thể), toàn bộ khung hình đã và đang bị lặng lẽ bỏ qua dù UI vẫn hiển thị "đang ghi"
      * bình thường. Phải phát hiện và huỷ sớm, tránh để buổi ghi chạy hết cả buổi rồi mới lộ
      * ra file trống/hỏng khi mở lên xem.
+     *
+     * [sessionId] chỉ khớp với [recordingSessionId] nếu đây vẫn là buổi ghi mà watchdog này
+     * được lập ra để theo dõi — nếu người dùng đã dừng rồi bắt đầu một buổi ghi khác trong
+     * vòng 5 giây đó, watchdog cũ này sẽ tự bỏ qua thay vì huỷ nhầm buổi ghi mới.
      */
-    private fun scheduleStartWatchdog(muxer: MuxerController) {
+    private fun scheduleStartWatchdog(muxer: MuxerController, sessionId: Int) {
         mainHandler.postDelayed({
-            if (RecordingStateHolder.state == RecordingState.RECORDING && !muxer.hasStarted()) {
+            if (sessionId == recordingSessionId &&
+                RecordingStateHolder.state == RecordingState.RECORDING &&
+                !muxer.hasStarted()
+            ) {
                 Log.e(TAG, "Watchdog: muxer chưa start sau ${START_WATCHDOG_MS}ms — huỷ buổi ghi")
                 cleanupAfterFailure(
                     "Không thể khởi tạo ghi âm thanh nội bộ trên thiết bị này — đã huỷ buổi ghi để " +
@@ -248,6 +281,42 @@ class ScreenRecordService : Service() {
                 performStop(null, error = t.describeForUser())
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Xoay màn hình khi đang ghi
+    // ------------------------------------------------------------------
+
+    private fun registerRotationListener() {
+        unregisterRotationListener()
+        val displayManager = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) {}
+            override fun onDisplayRemoved(displayId: Int) {}
+            override fun onDisplayChanged(displayId: Int) {
+                if (displayId != Display.DEFAULT_DISPLAY) return
+                if (RecordingStateHolder.state != RecordingState.RECORDING &&
+                    RecordingStateHolder.state != RecordingState.PAUSED
+                ) {
+                    return
+                }
+                val encoder = screenEncoder ?: return
+                runCatching {
+                    val metrics = realDisplayMetrics()
+                    val dims = computeCaptureDimensions(metrics.widthPixels, metrics.heightPixels, videoQuality)
+                    encoder.resize(dims.width, dims.height, metrics.densityDpi)
+                }.onFailure { Log.e(TAG, "Không thể resize VirtualDisplay sau khi xoay màn hình", it) }
+            }
+        }
+        displayListener = listener
+        runCatching { displayManager.registerDisplayListener(listener, mainHandler) }
+    }
+
+    private fun unregisterRotationListener() {
+        val listener = displayListener ?: return
+        displayListener = null
+        val displayManager = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return
+        runCatching { displayManager.unregisterDisplayListener(listener) }
     }
 
     // ------------------------------------------------------------------
@@ -293,6 +362,7 @@ class ScreenRecordService : Service() {
         stopCallback = callback
         RecordingStateHolder.markStopping(this)
         mainHandler.removeCallbacks(tickerRunnable)
+        unregisterRotationListener()
 
         val encoder = screenEncoder
         val audio = audioCapture
@@ -303,7 +373,10 @@ class ScreenRecordService : Service() {
         audio?.stop()
 
         Thread {
-            audio?.awaitFinished()
+            val audioFinished = audio?.awaitFinished() ?: true
+            if (!audioFinished) {
+                Log.e(TAG, "Luồng ghi âm thanh không thoát kịp trong thời gian chờ — release() sẽ tự bỏ qua để tránh crash")
+            }
             waitForVideoDrain()
             mainHandler.post { finalizeRecording(error) }
         }.start()
@@ -385,6 +458,7 @@ class ScreenRecordService : Service() {
 
     private fun cleanupAfterFailure(reason: String? = null) {
         mainHandler.removeCallbacks(tickerRunnable)
+        unregisterRotationListener()
         val encoder = screenEncoder
         val audio = audioCapture
         // Dừng nguồn trước rồi mới release, tránh đụng độ với luồng nền của AudioCapture
@@ -392,8 +466,13 @@ class ScreenRecordService : Service() {
         runCatching { encoder?.signalEndOfStream() }
         runCatching { audio?.stop() }
         Thread {
-            runCatching { audio?.awaitFinished(1500) }
-            Thread.sleep(100)
+            val audioFinished = runCatching { audio?.awaitFinished(1500) }.getOrDefault(true)
+            if (audioFinished == false) {
+                Log.e(TAG, "Luồng ghi âm thanh không thoát kịp khi huỷ sớm — release() sẽ tự bỏ qua để tránh crash")
+            }
+            // Chờ video drain giống hệt luồng dừng thành công (waitForVideoDrain), tránh
+            // release() encoder trong khi callback MediaCodec vẫn còn xử lý buffer cuối.
+            waitForVideoDrain()
             mainHandler.post {
                 runCatching { encoder?.release() }
                 runCatching { audio?.release() }
@@ -454,6 +533,26 @@ class ScreenRecordService : Service() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(tickerRunnable)
+        unregisterRotationListener()
+        val state = RecordingStateHolder.state
+        if (state == RecordingState.RECORDING || state == RecordingState.PAUSED || state == RecordingState.STOPPING) {
+            // Tiến trình/Service đang bị hệ thống hoặc OEM (MIUI/Huawei...) thu hồi giữa buổi
+            // ghi — không còn thời gian để chờ luồng nền thoát gọn như performStop() bình
+            // thường. Cố dọn tài nguyên native + xoá bản ghi MediaStore dở dang (IS_PENDING=1)
+            // tốt nhất có thể, để không mồ côi tài nguyên hay để lại file "đang chờ" vô hình
+            // trong Gallery. Không thể phục hồi được nội dung đã ghi trong trường hợp này.
+            runCatching { screenEncoder?.release() }
+            runCatching { audioCapture?.release() }
+            runCatching { muxerController?.finalizeAndRelease() }
+            runCatching { outputPfd?.close() }
+            runCatching { outputTarget?.deleteIfIncomplete(this) }
+            runCatching { releaseProjection() }
+            screenEncoder = null
+            audioCapture = null
+            muxerController = null
+            outputTarget = null
+            outputPfd = null
+        }
         super.onDestroy()
     }
 

@@ -102,18 +102,37 @@ class ScreenEncoder(
         virtualDisplay?.setSurface(inputSurface)
     }
 
+    /**
+     * Đổi kích thước logic của VirtualDisplay khi màn hình xoay trong lúc đang ghi (ví dụ
+     * dọc -> ngang). Surface đầu vào của codec giữ NGUYÊN kích thước gốc đã cấu hình lúc
+     * start() — MediaCodec surface-input không hỗ trợ đổi kích thước format sau configure().
+     * Hệ thống sẽ co dãn nội dung màn hình mới vào đúng surface đó; nếu tỷ lệ khung hình đổi
+     * (dọc <-> ngang) video có thể bị méo/co kéo, nhưng KHÔNG crash — ưu tiên của fix này là
+     * giữ buổi ghi tiếp tục chạy an toàn thay vì tự đổi định dạng codec giữa chừng (rủi ro cao
+     * hơn nhiều so với lợi ích).
+     */
+    fun resize(newWidth: Int, newHeight: Int, densityDpi: Int) {
+        runCatching { virtualDisplay?.resize(newWidth, newHeight, densityDpi) }
+    }
+
     /** Báo hiệu kết thúc luồng — buffer EOS cuối cùng sẽ tới qua onEncodedFrame. */
     fun signalEndOfStream() {
         runCatching { codec.signalEndOfInputStream() }.onFailure { onCodecError(it) }
     }
 
     fun release() {
+        // Tháo VirtualDisplay trước để ngừng nhận khung hình mới, rồi cho HandlerThread xử lý
+        // nốt các message callback đã xếp hàng (nếu có) và thoát HẮN (join) TRƯỚC KHI gọi
+        // codec.stop()/release() từ luồng gọi hàm này — tránh race giữa luồng callback
+        // (onOutputBufferAvailable chạy trên handlerThread) và stop()/release() chạy đồng thời
+        // trên một luồng khác.
         runCatching { virtualDisplay?.release() }
         virtualDisplay = null
+        handlerThread?.quitSafely()
+        runCatching { handlerThread?.join(500) }
+        handlerThread = null
         runCatching { codec.stop() }
         runCatching { codec.release() }
         runCatching { inputSurface.release() }
-        handlerThread?.quitSafely()
-        handlerThread = null
     }
 }

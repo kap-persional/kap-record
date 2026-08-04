@@ -4,6 +4,7 @@ import android.media.MediaCodec
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import java.nio.ByteBuffer
 
 /**
@@ -70,6 +71,7 @@ class MuxerController(pfd: ParcelFileDescriptor) {
                 buffer.position(info.offset)
                 buffer.limit(info.offset + info.size)
                 runCatching { muxer.writeSampleData(trackIndex, buffer, adjusted) }
+                    .onFailure { Log.e(TAG, "writeSampleData lỗi (track=$trackIndex, size=${info.size})", it) }
                 if (relativeUs > maxPresentationUs) maxPresentationUs = relativeUs
             }
 
@@ -95,5 +97,9 @@ class MuxerController(pfd: ParcelFileDescriptor) {
             }
             runCatching { muxer.release() }
         }
+    }
+
+    companion object {
+        private const val TAG = "MuxerController"
     }
 }

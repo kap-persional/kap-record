@@ -17,7 +17,13 @@ import com.kap.record.tile.RecordTileService
 object RecordingStateHolder {
 
     interface Listener {
-        fun onStateChanged(state: RecordingState, isPaused: Boolean, elapsedMs: Long, error: String?)
+        fun onStateChanged(
+            state: RecordingState,
+            isPaused: Boolean,
+            elapsedMs: Long,
+            error: String?,
+            audioLikelySilent: Boolean
+        )
     }
 
     @Volatile
@@ -26,6 +32,16 @@ object RecordingStateHolder {
 
     @Volatile
     var isPaused: Boolean = false
+        private set
+
+    /**
+     * Cờ cảnh báo (không phải lỗi): trong buổi ghi hiện tại, AudioCapture phát hiện dữ liệu
+     * PCM gần như im lặng suốt vài giây đầu — có thể do thiết bị OEM không capture được âm
+     * thanh nội bộ dù AudioRecord khởi tạo "thành công". Chỉ mang tính heuristic cảnh báo cho
+     * người dùng, KHÔNG huỷ buổi ghi.
+     */
+    @Volatile
+    var audioLikelySilent: Boolean = false
         private set
 
     private var startElapsedRealtime: Long = 0L
@@ -77,6 +93,7 @@ object RecordingStateHolder {
         isPaused = false
         accumulatedMs = 0L
         startElapsedRealtime = SystemClock.elapsedRealtime()
+        audioLikelySilent = false
         persistAndNotify(context, null)
     }
 
@@ -101,11 +118,19 @@ object RecordingStateHolder {
         persistAndNotify(context, null)
     }
 
+    /** Đánh dấu buổi ghi hiện tại có vẻ đang ghi audio im lặng — chỉ cảnh báo, không đổi state. */
+    fun markAudioLikelySilent(context: Context) {
+        if (audioLikelySilent) return
+        audioLikelySilent = true
+        persistAndNotify(context, null)
+    }
+
     fun reset(context: Context, error: String? = null) {
         state = RecordingState.IDLE
         isPaused = false
         accumulatedMs = 0L
         startElapsedRealtime = 0L
+        audioLikelySilent = false
         persistAndNotify(context, error)
     }
 
@@ -113,7 +138,7 @@ object RecordingStateHolder {
     fun tick(context: Context) {
         if (state != RecordingState.RECORDING && state != RecordingState.PAUSED) return
         val snapshotElapsed = currentElapsedMs()
-        listeners.toList().forEach { it.onStateChanged(state, isPaused, snapshotElapsed, null) }
+        listeners.toList().forEach { it.onStateChanged(state, isPaused, snapshotElapsed, null, audioLikelySilent) }
     }
 
     private fun persistAndNotify(context: Context, error: String?) {
@@ -123,7 +148,7 @@ object RecordingStateHolder {
             .putLong(Constants.PREF_ACCUMULATED_MS, accumulatedMs)
             .apply()
         val snapshotElapsed = currentElapsedMs()
-        listeners.toList().forEach { it.onStateChanged(state, isPaused, snapshotElapsed, error) }
+        listeners.toList().forEach { it.onStateChanged(state, isPaused, snapshotElapsed, error, audioLikelySilent) }
         requestTileRefresh(context)
     }
 

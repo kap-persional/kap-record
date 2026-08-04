@@ -14,7 +14,9 @@ import android.media.MediaFormat
 import android.media.projection.MediaProjection
 import androidx.core.content.ContextCompat
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 
 /**
  * Ghi âm thanh phát ra từ chính thiết bị (nhạc/video đang phát trong app khác) qua
@@ -29,7 +31,8 @@ class AudioCapture(
     private val quality: AudioQuality,
     private val onFormatReady: (MediaFormat) -> Int,
     private val onEncodedFrame: (trackIndex: Int, buffer: ByteBuffer, info: MediaCodec.BufferInfo) -> Unit,
-    private val onCodecError: (Throwable) -> Unit
+    private val onCodecError: (Throwable) -> Unit,
+    private val onSilentAudioDetected: () -> Unit = {}
 ) {
     private val channelCount = 2
     private var audioRecord: AudioRecord? = null
@@ -38,6 +41,7 @@ class AudioCapture(
     private val running = AtomicBoolean(false)
     @Volatile private var paused = false
     @Volatile private var trackIndex = -1
+    @Volatile private var released = false
     private var minBufferSize = 0
 
     @SuppressLint("MissingPermission")
@@ -129,11 +133,23 @@ class AudioCapture(
         running.set(false)
     }
 
-    fun awaitFinished(timeoutMs: Long = 4000) {
-        thread?.join(timeoutMs)
+    /** Trả về true nếu luồng ghi nền đã thực sự thoát trong thời gian chờ. */
+    fun awaitFinished(timeoutMs: Long = 4000): Boolean {
+        val t = thread ?: return true
+        t.join(timeoutMs)
+        return !t.isAlive
     }
 
     fun release() {
+        if (thread?.isAlive == true) {
+            // Luồng ghi nền vẫn chưa thoát dù đã stop() + chờ awaitFinished() (ví dụ
+            // AudioRecord.read() bị kẹt trên driver OEM lỗi) — TUYỆT ĐỐI không được đụng vào
+            // codec/audioRecord ở đây vì runLoop() có thể vẫn đang thao tác trên cùng các
+            // object đó trên luồng khác, dễ gây crash hoặc dữ liệu hỏng. Chấp nhận rò rỉ tài
+            // nguyên nhỏ trong trường hợp hiếm này thay vì crash — an toàn hơn.
+            return
+        }
+        released = true
         runCatching { audioRecord?.stop() }
         runCatching { audioRecord?.release() }
         audioRecord = null
@@ -145,8 +161,12 @@ class AudioCapture(
         val pcmBuffer = ByteArray(minBufferSize)
         val startNanos = System.nanoTime()
         var consecutiveErrors = 0
+        var silenceAmplitudeSum = 0L
+        var silenceSampleCount = 0L
+        var silenceWarningSent = false
         try {
             while (running.get()) {
+                if (released) return
                 if (paused) {
                     Thread.sleep(20)
                     continue
@@ -156,6 +176,31 @@ class AudioCapture(
                 val captureTimeUs = (System.nanoTime() - startNanos) / 1000
                 if (read > 0) {
                     consecutiveErrors = 0
+                    if (!silenceWarningSent) {
+                        val shorts = ByteBuffer.wrap(pcmBuffer, 0, read - (read % 2))
+                            .order(ByteOrder.LITTLE_ENDIAN)
+                            .asShortBuffer()
+                        while (shorts.hasRemaining()) {
+                            silenceAmplitudeSum += abs(shorts.get().toInt())
+                            silenceSampleCount++
+                        }
+                        // Sau vài giây đầu (cùng mốc với watchdog start ở ScreenRecordService),
+                        // nếu biên độ trung bình gần như 0 thì rất có thể AudioRecord "ghi được"
+                        // nhưng dữ liệu thực chất là im lặng (vấn đề đã gặp trên một số máy
+                        // Samsung/OEM) — cảnh báo một lần cho người dùng, KHÔNG huỷ buổi ghi vì
+                        // nội dung thật sự có thể đang im lặng (người dùng không phát gì).
+                        if (captureTimeUs >= SILENCE_CHECK_WINDOW_US) {
+                            silenceWarningSent = true
+                            val avgAmplitude = if (silenceSampleCount > 0) {
+                                silenceAmplitudeSum / silenceSampleCount
+                            } else {
+                                0L
+                            }
+                            if (avgAmplitude < SILENCE_AMPLITUDE_THRESHOLD) {
+                                onSilentAudioDetected()
+                            }
+                        }
+                    }
                     feedInput(pcmBuffer, read, captureTimeUs, endOfStream = false)
                 } else if (read < 0) {
                     // read() trả về mã lỗi âm (ERROR_INVALID_OPERATION, ERROR_DEAD_OBJECT...).
@@ -168,12 +213,14 @@ class AudioCapture(
                     }
                     Thread.sleep(20)
                 }
+                if (released) return
                 drainOutput(endOfStream = false)
             }
+            if (released) return
             feedInput(pcmBuffer, 0, (System.nanoTime() - startNanos) / 1000, endOfStream = true)
             drainOutput(endOfStream = true)
         } catch (t: Throwable) {
-            onCodecError(t)
+            if (!released) onCodecError(t)
         }
     }
 
@@ -224,5 +271,10 @@ class AudioCapture(
                 else -> return
             }
         }
+    }
+
+    companion object {
+        private const val SILENCE_CHECK_WINDOW_US = 5_000_000L
+        private const val SILENCE_AMPLITUDE_THRESHOLD = 50
     }
 }

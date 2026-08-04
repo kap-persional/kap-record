@@ -22,7 +22,7 @@ import io.flutter.plugin.common.MethodChannel
 /**
  * Cầu nối MethodChannel/EventChannel <-> ScreenRecordService. Dùng chung cho MainActivity
  * (luồng mở từ trong app) và CountdownActivity (luồng mở từ Quick Settings Tile) — mỗi
- * Activity có FlutterEngine riêng nhưng đều bind vào CÙNG MỘT ScreenRecordService
+ * Activity có FlutterEngine riêng nhưng đều bind vào CÚNG MỘT ScreenRecordService
  * (singleton trong tiến trình), nên trạng thái luôn nhất quán.
  */
 class RecorderChannelHandler(private val activity: Activity) :
@@ -229,7 +229,8 @@ class RecorderChannelHandler(private val activity: Activity) :
             RecordingStateHolder.state,
             RecordingStateHolder.isPaused,
             RecordingStateHolder.currentElapsedMs(),
-            null
+            null,
+            RecordingStateHolder.audioLikelySilent
         )
     }
 
@@ -238,9 +239,15 @@ class RecorderChannelHandler(private val activity: Activity) :
         eventSink = null
     }
 
-    override fun onStateChanged(state: RecordingState, isPaused: Boolean, elapsedMs: Long, error: String?) {
+    override fun onStateChanged(
+        state: RecordingState,
+        isPaused: Boolean,
+        elapsedMs: Long,
+        error: String?,
+        audioLikelySilent: Boolean
+    ) {
         mainHandler.post {
-            eventSink?.success(stateMap(state, isPaused, elapsedMs, error))
+            eventSink?.success(stateMap(state, isPaused, elapsedMs, error, audioLikelySilent))
         }
     }
 
@@ -250,17 +257,24 @@ class RecorderChannelHandler(private val activity: Activity) :
             RecordingStateHolder.state,
             RecordingStateHolder.isPaused,
             RecordingStateHolder.currentElapsedMs(),
-            null
+            null,
+            RecordingStateHolder.audioLikelySilent
         )
     }
 
-    private fun stateMap(state: RecordingState, isPaused: Boolean, elapsedMs: Long, error: String?) =
-        mapOf(
-            "state" to state.name.lowercase(),
-            "elapsedSeconds" to (elapsedMs / 1000).toInt(),
-            "isPaused" to isPaused,
-            "error" to error
-        )
+    private fun stateMap(
+        state: RecordingState,
+        isPaused: Boolean,
+        elapsedMs: Long,
+        error: String?,
+        audioLikelySilent: Boolean
+    ) = mapOf(
+        "state" to state.name.lowercase(),
+        "elapsedSeconds" to (elapsedMs / 1000).toInt(),
+        "isPaused" to isPaused,
+        "error" to error,
+        "audioLikelySilent" to audioLikelySilent
+    )
 
     companion object {
         private const val REQUEST_CODE_PROJECTION = 9821
