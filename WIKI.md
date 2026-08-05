@@ -7,7 +7,7 @@
 **Package / applicationId**: `com.kap.record`  
 **minSdkVersion**: 29 (Android 10 — bắt buộc vì `AudioPlaybackCaptureConfiguration` chỉ có từ API 29)  
 **Gradle**: 8.11.1 | **AGP**: 8.7.2 | **Kotlin**: 2.0.21 | **Flutter**: stable (3.44+)  
-**Branch làm việc**: `claude/android-screen-recorder-app-qy8tma`
+**Branch làm việc**: `dev` (phát triển hàng ngày, push tự do) — `main` chỉ merge khi người dùng yêu cầu rõ ràng ("merge", "build"). Xem quy tắc đầy đủ trong `CLAUDE.md`.
 
 ---
 
@@ -287,6 +287,14 @@ File: `.github/workflows/build.yml`
 
 **Lưu ý**: Emulator **không mô phỏng** `AudioPlaybackCaptureConfiguration` đúng — chỉ smoke test crash/startup, không xác nhận âm thanh nội bộ. Không xác nhận được cảnh báo audio-im-lặng, xoay màn hình khi ghi, hay hành vi khi OS/OEM kill service — các phần này cần test tay trên thiết bị thật.
 
+### Trigger — CHỈ build tự động trên `main`
+
+`build.yml` cấu hình `on.push.branches: ['main']` — **push vào `dev` KHÔNG tự trigger CI**. Đây là quyết định có chủ đích: `dev` là nơi commit lặt vặt hàng ngày, build APK mỗi lần push sẽ tốn phút CI vô ích. CI chỉ tự chạy khi có push vào `main`, tức là khi người dùng yêu cầu rõ ràng "merge"/"build" và merge `dev` → `main` (xem quy tắc branch trong `CLAUDE.md` — KHÔNG tự ý merge vào `main` khi chưa được yêu cầu).
+
+Muốn build thử trên `dev` mà chưa merge vào `main`: chạy tay qua `workflow_dispatch` (tab Actions → chọn workflow → Run workflow → chọn branch `dev`), không sửa lại trigger `push` về `dev`.
+
+**Trạng thái build gần nhất đã xác nhận** (05/08/2026, commit `623eea91c...` merge vào `main`): `flutter analyze` xanh, `flutter build apk --debug` thành công, `emulator-smoke-test` xác nhận app mở lên không crash. Ghi âm thanh nội bộ thật trên thiết bị vẫn cần test tay (xem mục "Vấn đề còn tồn tại" bên dưới).
+
 ---
 
 ## Lịch sử lỗi đã sửa
@@ -385,7 +393,7 @@ flutter build apk --debug
 flutter build apk --release
 ```
 
-APK debug build qua CI tự động khi push lên branch `claude/**` hoặc `main`. Download từ tab **Actions** → chọn run → **Artifacts** → `kap-record-debug-apk`.
+APK debug build qua CI **tự động chỉ khi push lên `main`** (xem mục "Trigger — CHỈ build tự động trên `main`" ở phần CI/CD phía trên). Download từ tab **Actions** → chọn run → **Artifacts** → `kap-record-debug-apk`.
 
 ---
 
