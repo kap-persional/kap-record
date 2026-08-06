@@ -19,6 +19,7 @@ Push code, commit fix/tính năng lên `dev` **tự do, không cần hỏi xin p
 - **Trước tiên cập nhật `WIKI.md`** (mục lỗi đã sửa, trạng thái build đã xác nhận, vấn đề còn tồn tại nếu có thay đổi) — cập nhật trên `dev` trước khi merge.
 - Sau đó **merge PR đang mở vào `main`** (không tạo PR mới nếu đã có sẵn từ bước 2).
 - Việc cập nhật `WIKI.md` không tự trigger build lại (đã có `paths-ignore: ['**.md']`) nên không ảnh hưởng tới kết quả build đã test ở bước 2.
+- **Merge vào `main` KHÔNG tự build lại lần nữa** — `build.yml` chỉ có trigger `pull_request` (không còn `push: branches: [main]`), vì nội dung merge chính là commit đã được build/test xanh ngay trên PR ở bước 2 rồi, build lại là dư thừa. Nếu vì lý do nào đó cần build tay trên `main` sau khi merge, dùng `workflow_dispatch` (tab Actions → Run workflow → chọn `main`).
 
 **Không tự ý merge vào `main` khi chưa được yêu cầu rõ ràng ở bước 3**, kể cả khi PR ở bước 2 đã build xanh.
 
