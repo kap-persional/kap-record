@@ -287,15 +287,17 @@ File: `.github/workflows/build.yml`
 
 **Lưu ý**: Emulator **không mô phỏng** `AudioPlaybackCaptureConfiguration` đúng — chỉ smoke test crash/startup, không xác nhận âm thanh nội bộ. Không xác nhận được cảnh báo audio-im-lặng, xoay màn hình khi ghi, hay hành vi khi OS/OEM kill service — các phần này cần test tay trên thiết bị thật.
 
-### Trigger — CHỈ build tự động trên `main`
+### Trigger — CHỈ build trên Pull Request nhắm vào `main` (không có trigger `push`)
 
-`build.yml` cấu hình `on.push.branches: ['main']` — **push vào `dev` KHÔNG tự trigger CI**. Đây là quyết định có chủ đích: `dev` là nơi commit lặt vặt hàng ngày, build APK mỗi lần push sẽ tốn phút CI vô ích. CI chỉ tự chạy khi có push vào `main`, tức là khi người dùng yêu cầu rõ ràng "merge"/"build" và merge `dev` → `main` (xem quy tắc branch trong `CLAUDE.md` — KHÔNG tự ý merge vào `main` khi chưa được yêu cầu).
+`build.yml` **không còn** trigger `push` — chỉ còn `on.pull_request.branches: ['main']` và `workflow_dispatch`. Quy trình 3 bước (xem đầy đủ trong `CLAUDE.md`):
 
-Muốn build thử trên `dev` mà chưa merge vào `main`: chạy tay qua `workflow_dispatch` (tab Actions → chọn workflow → Run workflow → chọn branch `dev`), không sửa lại trigger `push` về `dev`.
+1. **Code trên `dev`** — push tự do, không trigger gì cả (không tốn phút CI cho từng commit lặt vặt).
+2. **Người dùng bảo "build"** → mở (hoặc dùng lại) Pull Request `dev` → `main`. CI tự chạy trên PR này (build APK + emulator smoke-test) để biết build ổn không TRƯỚC khi bấm merge. Người dùng tải APK debug từ artifact của run đó để test tay. Nếu còn lỗi, sửa tiếp trên `dev` rồi push — PR đang mở tự động build lại (GitHub tự bắn sự kiện `pull_request.synchronize` khi nhánh nguồn của PR có commit mới), không cần thao tác gì thêm với PR.
+3. **Người dùng bảo "merge main"** → cập nhật `WIKI.md` trước, rồi merge PR đó vào `main`. **Merge KHÔNG build lại** — nội dung merge chính là commit đã build/test xanh ngay trên PR ở bước 2, build lại là dư thừa (đây là lý do bỏ hẳn trigger `push`).
 
-**Cũng chạy trên Pull Request nhắm vào `main`** (`on.pull_request.branches: ['main']`): khi mở PR `dev` → `main`, CI tự chạy ngay (build APK + emulator smoke-test) để biết build có lỗi TRƯỚC khi bấm nút merge, không cần đợi merge xong mới phát hiện lỗi. Chỉ mở PR (chưa merge) vẫn build được — khác với trước đây (chỉ trigger `push`) là chỉ merge xong mới biết build pass hay fail.
+Muốn build tay bất kỳ lúc nào (ví dụ build lại `main` sau khi đã merge): dùng `workflow_dispatch` (tab Actions → chọn workflow → Run workflow → chọn branch).
 
-**Bỏ qua build nếu chỉ đổi file `.md`** (`paths-ignore: ['**.md']` trên cả `push` và `pull_request`): commit/PR chỉ sửa tài liệu thuần tuý (`WIKI.md`, `CLAUDE.md`, README...) sẽ KHÔNG trigger CI — tránh tốn phút build cho thay đổi không ảnh hưởng code. Nếu một commit/PR đổi cả file `.md` lẫn code, CI vẫn chạy bình thường (chỉ bỏ qua khi TOÀN BỘ file thay đổi đều khớp `**.md`).
+**Bỏ qua build nếu chỉ đổi file `.md`** (`paths-ignore: ['**.md']` trên `pull_request`): PR chỉ sửa tài liệu thuần tuý (`WIKI.md`, `CLAUDE.md`, README...) sẽ KHÔNG trigger CI — tránh tốn phút build cho thay đổi không ảnh hưởng code. Nếu một PR đổi cả file `.md` lẫn code, CI vẫn chạy bình thường (chỉ bỏ qua khi TOÀN BỘ file thay đổi đều khớp `**.md`).
 
 **Trạng thái build gần nhất đã xác nhận** (05/08/2026, commit `623eea91c...` merge vào `main`): `flutter analyze` xanh, `flutter build apk --debug` thành công, `emulator-smoke-test` xác nhận app mở lên không crash. Ghi âm thanh nội bộ thật trên thiết bị vẫn cần test tay (xem mục "Vấn đề còn tồn tại" bên dưới).
 
@@ -397,7 +399,7 @@ flutter build apk --debug
 flutter build apk --release
 ```
 
-APK debug build qua CI **tự động chỉ khi push lên `main`** (xem mục "Trigger — CHỈ build tự động trên `main`" ở phần CI/CD phía trên). Download từ tab **Actions** → chọn run → **Artifacts** → `kap-record-debug-apk`.
+APK debug build qua CI **tự động khi mở Pull Request `dev` → `main`** (xem mục "Trigger — CHỈ build trên Pull Request nhắm vào `main`" ở phần CI/CD phía trên) — không phải khi push. Download từ tab **Actions** của PR đó → chọn run → **Artifacts** → `kap-record-debug-apk`.
 
 ---
 
