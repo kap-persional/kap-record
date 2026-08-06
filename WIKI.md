@@ -293,6 +293,10 @@ File: `.github/workflows/build.yml`
 
 Muốn build thử trên `dev` mà chưa merge vào `main`: chạy tay qua `workflow_dispatch` (tab Actions → chọn workflow → Run workflow → chọn branch `dev`), không sửa lại trigger `push` về `dev`.
 
+**Cũng chạy trên Pull Request nhắm vào `main`** (`on.pull_request.branches: ['main']`): khi mở PR `dev` → `main`, CI tự chạy ngay (build APK + emulator smoke-test) để biết build có lỗi TRƯỚC khi bấm nút merge, không cần đợi merge xong mới phát hiện lỗi. Chỉ mở PR (chưa merge) vẫn build được — khác với trước đây (chỉ trigger `push`) là chỉ merge xong mới biết build pass hay fail.
+
+**Bỏ qua build nếu chỉ đổi file `.md`** (`paths-ignore: ['**.md']` trên cả `push` và `pull_request`): commit/PR chỉ sửa tài liệu thuần tuý (`WIKI.md`, `CLAUDE.md`, README...) sẽ KHÔNG trigger CI — tránh tốn phút build cho thay đổi không ảnh hưởng code. Nếu một commit/PR đổi cả file `.md` lẫn code, CI vẫn chạy bình thường (chỉ bỏ qua khi TOÀN BỘ file thay đổi đều khớp `**.md`).
+
 **Trạng thái build gần nhất đã xác nhận** (05/08/2026, commit `623eea91c...` merge vào `main`): `flutter analyze` xanh, `flutter build apk --debug` thành công, `emulator-smoke-test` xác nhận app mở lên không crash. Ghi âm thanh nội bộ thật trên thiết bị vẫn cần test tay (xem mục "Vấn đề còn tồn tại" bên dưới).
 
 ---
