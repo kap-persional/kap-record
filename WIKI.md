@@ -6,7 +6,7 @@
 
 **Package / applicationId**: `com.kap.record`  
 **minSdkVersion**: 29 (Android 10 — bắt buộc vì `AudioPlaybackCaptureConfiguration` chỉ có từ API 29)  
-**Gradle**: 8.11.1 | **AGP**: 8.7.2 | **Kotlin**: 2.0.21 | **Flutter**: stable (3.44+)  
+**Gradle**: 8.14.3 | **AGP**: 8.11.1 | **Kotlin**: 2.2.20 | **Flutter**: stable (CI runner tự dùng bản mới nhất — xem mục "Bảo trì phiên bản Gradle/AGP/Kotlin" trong CI/CD)  
 **Branch làm việc**: `dev` (phát triển hàng ngày, push tự do) — `main` chỉ merge khi người dùng yêu cầu rõ ràng ("merge", "build"). Xem quy tắc đầy đủ trong `CLAUDE.md`.
 
 ---
@@ -287,13 +287,30 @@ File: `.github/workflows/build.yml`
 
 **Lưu ý**: Emulator **không mô phỏng** `AudioPlaybackCaptureConfiguration` đúng — chỉ smoke test crash/startup, không xác nhận âm thanh nội bộ. Không xác nhận được cảnh báo audio-im-lặng, xoay màn hình khi ghi, hay hành vi khi OS/OEM kill service — các phần này cần test tay trên thiết bị thật.
 
-### Trigger — CHỈ build tự động trên `main`
+### Bảo trì phiên bản Gradle/AGP/Kotlin (CI runner tự nâng cấp Flutter theo thời gian)
 
-`build.yml` cấu hình `on.push.branches: ['main']` — **push vào `dev` KHÔNG tự trigger CI**. Đây là quyết định có chủ đích: `dev` là nơi commit lặt vặt hàng ngày, build APK mỗi lần push sẽ tốn phút CI vô ích. CI chỉ tự chạy khi có push vào `main`, tức là khi người dùng yêu cầu rõ ràng "merge"/"build" và merge `dev` → `main` (xem quy tắc branch trong `CLAUDE.md` — KHÔNG tự ý merge vào `main` khi chưa được yêu cầu).
+`subosito/flutter-action@v2` dùng `channel: 'stable'` không ghim version cụ thể — mỗi lần Flutter ra bản stable mới, runner GitHub Actions tự dùng bản mới đó ở lần chạy CI tiếp theo, kéo theo yêu cầu tối thiểu Gradle/AGP/Kotlin cao hơn. Đây là **nguồn lỗi định kỳ, không phải lỗi code** — dấu hiệu nhận biết: log lỗi bắt đầu bằng `"Your project's <Gradle/Android Gradle Plugin/Kotlin> version (...) is lower than Flutter's minimum supported version of ..."` ngay ở bước `flutter build apk` ban đầu (không phải lỗi Kotlin compile trong `android/app/src/main/kotlin/com/kap/record/`).
 
-Muốn build thử trên `dev` mà chưa merge vào `main`: chạy tay qua `workflow_dispatch` (tab Actions → chọn workflow → Run workflow → chọn branch `dev`), không sửa lại trigger `push` về `dev`.
+**Cách sửa**: bump đúng file/dòng tương ứng lên đúng mốc tối thiểu mà log báo (không cần bump cao hơn, tránh cảnh báo/rủi ro không cần thiết):
+- Gradle → `android/gradle/wrapper/gradle-wrapper.properties` (`distributionUrl`)
+- AGP → `android/settings.gradle` (`id "com.android.application" version "..."`)
+- Kotlin → `android/settings.gradle` (`id "org.jetbrains.kotlin.android" version "..."`)
 
-**Trạng thái build gần nhất đã xác nhận** (05/08/2026, commit `623eea91c...` merge vào `main`): `flutter analyze` xanh, `flutter build apk --debug` thành công, `emulator-smoke-test` xác nhận app mở lên không crash. Ghi âm thanh nội bộ thật trên thiết bị vẫn cần test tay (xem mục "Vấn đề còn tồn tại" bên dưới).
+Ba mốc này phụ thuộc lẫn nhau (Gradle mới → có thể cần AGP mới → có thể cần Kotlin mới) nên thường phải sửa lần lượt qua vài vòng CI mới hết lỗi hoàn toàn — bump 1 cái, đợi CI báo lỗi tiếp theo (nếu có), bump tiếp, lặp lại đến khi xanh. Đã xảy ra đúng kịch bản này ngày 27/08/2026 (Lỗi 15).
+
+### Trigger — CHỈ build trên Pull Request nhắm vào `main` (không có trigger `push`)
+
+`build.yml` **không còn** trigger `push` — chỉ còn `on.pull_request.branches: ['main']` và `workflow_dispatch`. Quy trình 3 bước (xem đầy đủ trong `CLAUDE.md`):
+
+1. **Code trên `dev`** — push tự do, không trigger gì cả (không tốn phút CI cho từng commit lặt vặt).
+2. **Người dùng bảo "build"** → mở (hoặc dùng lại) Pull Request `dev` → `main`. CI tự chạy trên PR này (build APK + emulator smoke-test) để biết build ổn không TRƯỚC khi bấm merge. Người dùng tải APK debug từ artifact của run đó để test tay. Nếu còn lỗi, sửa tiếp trên `dev` rồi push — PR đang mở tự động build lại (GitHub tự bắn sự kiện `pull_request.synchronize` khi nhánh nguồn của PR có commit mới), không cần thao tác gì thêm với PR.
+3. **Người dùng bảo "merge main"** → cập nhật `WIKI.md` trước, rồi merge PR đó vào `main`. **Merge KHÔNG build lại** — nội dung merge chính là commit đã build/test xanh ngay trên PR ở bước 2, build lại là dư thừa (đây là lý do bỏ hẳn trigger `push`).
+
+Muốn build tay bất kỳ lúc nào (ví dụ build lại `main` sau khi đã merge): dùng `workflow_dispatch` (tab Actions → chọn workflow → Run workflow → chọn branch).
+
+**Bỏ qua build nếu chỉ đổi file `.md`** (`paths-ignore: ['**.md']` trên `pull_request`): PR chỉ sửa tài liệu thuần tuý (`WIKI.md`, `CLAUDE.md`, README...) sẽ KHÔNG trigger CI — tránh tốn phút build cho thay đổi không ảnh hưởng code. Nếu một PR đổi cả file `.md` lẫn code, CI vẫn chạy bình thường (chỉ bỏ qua khi TOÀN BỘ file thay đổi đều khớp `**.md`).
+
+**Trạng thái build gần nhất đã xác nhận** (27/08/2026, PR #2, commit `d6f1ba228d...`): `flutter analyze` xanh, `flutter build apk --debug` thành công (Flutter stable 3.47.1, Gradle 8.14.3, AGP 8.11.1, Kotlin 2.2.20), `emulator-smoke-test` xác nhận app mở lên không crash. Ghi âm thanh nội bộ thật trên thiết bị vẫn cần test tay (xem mục "Vấn đề còn tồn tại" bên dưới).
 
 ---
 
@@ -363,6 +380,10 @@ Muốn build thử trên `dev` mà chưa merge vào `main`: chạy tay qua `work
 **Nguyên nhân**: `_pickFolder()` không try/catch, không có cờ chặn bấm nhiều lần.  
 **Sửa**: Tách `_SaveLocationCard` thành `StatefulWidget` riêng với cờ `_picking` + try/catch trong `settings_screen.dart`.
 
+### Lỗi 15 (CI): Build fail liên tiếp vì runner tự nâng Flutter → Gradle/AGP/Kotlin lỗi thời
+**Nguyên nhân**: `subosito/flutter-action@v2` dùng `channel: 'stable'` không ghim version — GitHub Actions runner tự chuyển sang Flutter stable 3.47.1 (trước đó 3.44.8), nâng yêu cầu tối thiểu: Gradle 8.14.0, AGP 8.11.1, Kotlin 2.2.20 — cao hơn hẳn Gradle 8.11.1 / AGP 8.7.2 / Kotlin 2.0.21 đang pin trong repo. CI báo lỗi ngay ở bước `flutter build apk --debug` (không phải lỗi compile code), lần lượt qua 3 vòng vì mỗi lần chỉ lộ ra đúng 1 mốc chưa đủ.  
+**Sửa**: Bump tuần tự `android/gradle/wrapper/gradle-wrapper.properties` → Gradle 8.14.3, `android/settings.gradle` → AGP 8.11.1 và Kotlin 2.2.20. Xem mục "Bảo trì phiên bản Gradle/AGP/Kotlin" ở phần CI/CD để xử lý nhanh nếu lặp lại trong tương lai.
+
 ---
 
 ## Vấn đề còn tồn tại / Chưa xác nhận
@@ -393,7 +414,7 @@ flutter build apk --debug
 flutter build apk --release
 ```
 
-APK debug build qua CI **tự động chỉ khi push lên `main`** (xem mục "Trigger — CHỈ build tự động trên `main`" ở phần CI/CD phía trên). Download từ tab **Actions** → chọn run → **Artifacts** → `kap-record-debug-apk`.
+APK debug build qua CI **tự động khi mở Pull Request `dev` → `main`** (xem mục "Trigger — CHỈ build trên Pull Request nhắm vào `main`" ở phần CI/CD phía trên) — không phải khi push. Download từ tab **Actions** của PR đó → chọn run → **Artifacts** → `kap-record-debug-apk`.
 
 ---
 
@@ -401,7 +422,7 @@ APK debug build qua CI **tự động chỉ khi push lên `main`** (xem mục "T
 
 Container hiện tại (claude-code-remote) **không có** Flutter SDK và Android SDK — bị proxy chặn `dl.google.com`. Toàn bộ build và test chạy qua **GitHub Actions CI**. Để làm việc trực tiếp cần:
 
-- Flutter SDK stable (3.44+)
+- Flutter SDK stable (bản mới nhất tại thời điểm làm việc — xem mục "Bảo trì phiên bản Gradle/AGP/Kotlin" ở phần CI/CD nếu build local báo thiếu version)
 - Android SDK với build-tools 34+
 - Java 17 (temurin)
 - Thiết bị Android thật API 29+ (Android 10+) để test âm thanh nội bộ — emulator không đáng tin cậy với `AudioPlaybackCaptureConfiguration`
